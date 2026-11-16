@@ -1,69 +1,58 @@
 # Darknote Control Center — build status
 
-**This tree is not runnable right now.** It contains the UI layer of one build and the server
-layer of a second, concurrent build. `next build` cannot pass until one of them is chosen.
+Last updated: 2026-11-16 · branch `main`
 
-## What happened
+## Verified here
 
-Two implementations were written into `/project` at the same time:
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | 21/21 pass (`pipeline`, `monitor-editor`, `routes`) |
+| `npm run build` | passes (Next 15 production build) |
+| Power actions | `POST /api/monitor` → `POST /api/client/servers/{id}/power` `{"signal":"…"}`; the panel double answers 405 to any other verb and still sees the call only when POST is used |
+| Console | one persistent authenticated websocket per server, auth → `send logs`, live output buffered, reconnect with backoff, token expiry re-auth |
+| Large files | 3 MB file opened, chunked, saved with a backup, restored byte-identically |
+| Route surface | every client `apiGet/apiPost/apiPut/apiDelete` call maps to a route that exports that method |
 
-| Location | Contents |
-| --- | --- |
-| `project/darknote-control-center` | this tree — UI written for a Prisma backend |
-| `project/darknote-control` | a second tree with its own `node_modules`, Prisma-free SQL backend |
+## Fixed in this pass
 
-The second build also wrote into this folder: `src/lib/db.ts`, `src/lib/api.ts`,
-`src/lib/auth/`, `src/lib/services/`, `src/lib/pterodactyl/`, `src/lib/security/`,
-`src/lib/servers/`, `src/lib/util/`, `src/lib/sync.ts`, `src/lib/events.ts`. It replaced
-`package.json` (Prisma was removed) and deleted the files this UI imports:
-`src/lib/http.ts`, `guard.ts`, `rbac.ts`, `paths.ts`, `pterodactyl.ts`, `servers.ts`,
-`storage.ts`, `indexer.ts`, `search.ts`, `deploy.ts`, `monitor.ts`, `console.ts`,
-`downloads.ts`, `audit.ts` (replaced), `crypto.ts` (replaced).
+- **HTTP 405 on Restart/Start/Stop.** `POST /api/monitor` did not exist; the route only exported GET.
+  Added the power handler and moved power permission to `server.power`.
+- **Same defect elsewhere.** `PUT /api/drafts` (editor draft save), `POST /api/versions` (restore),
+  `POST /api/backups` (panel backup) and the whole chunked-draft resource were missing. All added.
+- **Live Monitor placeholders.** `buildMonitor` coerced missing CPU/RAM/disk/uptime to `0`; they are
+  now `null` and the UI shows “—”. Container state comes from `/resources`, not from a default.
+- **Console never attached.** The monitor passed `capture: false`, so nothing was ever captured.
+  The service now keeps one authenticated websocket per server; the monitor, terminal and deploy
+  health check share its buffer.
+- **WhatsApp state.** Parsing is restricted to WhatsApp-specific connection events from the current
+  process (a new process start resets it). Generic log text cannot change the badge. An optional
+  `DARKNOTE_BOT_STATUS_PATH` makes a bot-written status file authoritative.
+- **2 MB editor limit.** Removed. The 512 KB schema default × 4 was the cause. Per-server limit
+  (default 16 MB) clamped by a 64 MB process ceiling, chunked read/write, server-side drafts,
+  SHA-256 verified finalize, deploy by `draftId`, 413 with real sizes when genuinely too large.
+- **Mobile editor freezes.** The editor walked the entire string on every keystroke; validation is
+  now debounced and skipped above 400 K characters, and a large-file Monaco profile is applied.
+- **API key type.** A `ptla_` Application key is rejected up front with an actionable message
+  instead of a confusing 401 from every Client route.
 
-Because the UI calls `/api/...` routes that only existed in the deleted layer, the app
-compiles neither half.
+## Not verified here
 
-## What is complete and reusable
+- **Your real panel.** No panel URL, Client API key or server identifier were supplied. Everything
+  above ran against a protocol-accurate panel double. To confirm for real: Settings → Test
+  connection, then Restart/Start/Stop from Overview and Live Monitor, then open a >10 MB `.js`,
+  save a draft, deploy, and restore a version.
+- **A physical phone.** Chunked IO and the Monaco profile are exercised at API level only.
+- **Multiple replicas.** The console buffer and websocket are process memory. Run one instance, or
+  move the buffer to Redis/pub-sub before scaling out.
+- **Panel ranged reads.** Pterodactyl `/files/contents` has no range support, so the first open
+  downloads the whole file to the control center (cached 90 s) and slices it for the browser.
 
-UI (all 13 sections, responsive, dark premium theme):
+## Operational notes
 
-- `src/components/app-shell.tsx`, `providers.tsx`, `ui.tsx`
-- `src/app/(app)/page.tsx` — Overview
-- `monitor`, `discovery`, `files`, `editor` (Monaco + mobile toolbar), `cases`, `search`,
-  `sync`, `deployments`, `backups`, `downloads`, `console` (SSE), `settings`
-- `src/app/login/page.tsx` — sign-in + first-run bootstrap
-- `src/lib/client.ts` (CSRF-aware fetch, downloads), `use-api.ts`, `format.ts`
-
-Database design (Prisma, 20 models: servers, indexes, versions, backups, deployments,
-activity, drafts, sync history, conflicts, downloads):
-
-- `prisma/schema.prisma`
-
-Backend design that was implemented and then deleted (rewrite from the notes below):
-
-- Pterodactyl Client API wrapper: `files/list|contents|write|download|upload|mkdir|rename|
-  delete|copy|compress|decompress`, `resources`, `power`, `command`, `websocket`, `backups`
-- Safe path layer: `withinRoot`, traversal rejection, secret classification
-  (`.env`, `auth/`, `*.pem`, db files), binary sniffing
-- Discovery: breadth-first walk (no recursive API), size/mtime/SHA-256 diff, index upsert,
-  command metadata, conflict creation when a draft base hash is stale
-- Search: literal / regex / switch-case / function / fuzzy, live re-read of production
-- Cases: acorn AST extraction of `switch` cases with exact ranges, structural replace/
-  delete/duplicate, re-parse validation
-- Deploy: serializable DB lock, pre-flight conflict check, encrypted backup, write,
-  re-read + SHA verify, restart, console health check, per-deployment rollback
-- Console: server-side websocket relay with token refresh, ring buffer, SSE fan-out
-- Backups: AES-256-GCM local driver or S3 (SSE-AES256), versions with inline copy < 250 KB
-
-## Minimum work to finish (one architecture)
-
-1. Decide: Prisma backend (schema above) **or** the SQL backend in `darknote-control`.
-2. Delete the losing set of files and restore its `package.json`.
-3. Re-create the API routes for the 13 pages with a single response envelope; the UI expects
-   bare JSON payloads and `{ error: { code, message } }` on failure (`src/lib/client.ts`).
-4. `npm install && npx prisma generate && npm run build`.
-5. Configure `.env` from `.env.example`, create the first owner with `SETUP_TOKEN`, register
-   the panel URL + Client API key + server identifier, then run discovery.
-
-Nothing in this folder touches the bot or the Pterodactyl server. No credentials are stored
-in the UI layer; the placeholder `.env` was removed.
+- Set `DARKNOTE_SECRET` before production; changing it makes stored panel keys unreadable.
+- Use a **Client** API key (`ptlc_…`), never an Application key (`ptla_…`).
+- `DARKNOTE_MAX_EDITOR_BYTES` / `DARKNOTE_EDITOR_CHUNK_BYTES` tune large-file behaviour;
+  `DARKNOTE_BOT_STATUS_PATH` enables the authoritative WhatsApp probe.
+- Schema migration v2 raises old 512 KB server limits to 16 MB and adds the chunk table. It is
+  idempotent and runs on startup.

@@ -10,6 +10,7 @@ import {
 import { logActivity } from '@/lib/audit';
 import { query } from '@/lib/db';
 import { countsFor, serverStateView } from '@/lib/views';
+import { maxEditorCeiling } from '@/lib/pterodactyl/client';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,6 +27,7 @@ const createSchema = z.object({
   autoRestart: z.boolean().optional(),
   atomicWrites: z.boolean().optional(),
   startupTimeoutS: z.number().int().min(15).max(600).optional(),
+  maxFileBytes: z.number().int().min(65536).max(256 * 1024 * 1024).optional(),
   syncMode: z.enum(['polling', 'events']).optional(),
   syncIntervalS: z.number().int().min(60).max(86400).optional(),
 });
@@ -55,6 +57,8 @@ export const GET = route({ permission: 'file.read' }, async ({ user }) => {
       lastScanAt: server.lastScanAt,
       lastError: server.lastError,
       apiKeyHint: server.apiKeyHint,
+      maxFileBytes: server.maxFileBytes,
+      editorCeilingBytes: maxEditorCeiling(),
       counts: {
         files: Number(byId.get(server.id)?.files ?? 0),
         deployments: Number(byId.get(server.id)?.deployments ?? 0),
@@ -87,6 +91,7 @@ export const POST = route({ permission: 'server.manage' }, async ({ user, body }
       autoRestart: input.autoRestart,
       atomicWrites: input.atomicWrites,
       startupTimeoutS: input.startupTimeoutS,
+      maxFileBytes: input.maxFileBytes,
       syncMode: input.syncMode,
       syncIntervalS: input.syncIntervalS,
     },

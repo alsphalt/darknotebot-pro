@@ -1,5 +1,6 @@
 export const PERMISSIONS = [
   'server.manage',
+  'server.power',
   'file.read',
   'file.write',
   'file.delete',
@@ -20,6 +21,7 @@ export const ROLES = ['owner', 'admin', 'operator', 'viewer'] as const;
 export type Role = (typeof ROLES)[number];
 
 const OPERATOR: Permission[] = [
+  'server.power',
   'file.read',
   'file.write',
   'file.delete',

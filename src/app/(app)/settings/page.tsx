@@ -24,6 +24,7 @@ type Settings = {
 type ServerDetail = {
   server: {
     id: string; name: string; panelUrl: string; serverIdentifier: string; rootPath: string; apiKeyHint: string; state: string;
+    maxFileBytes: number; editorCeilingBytes: number;
     policy: {
       autoRestart: boolean; healthTimeoutMs: number; healthyPatterns: string[]; failurePatterns: string[];
       ignore: string[]; maxScanDepth: number; maxScanFiles: number; indexContent: boolean;
@@ -45,6 +46,7 @@ export default function SettingsPage() {
   const [caps, setCaps] = useState<Capability[] | null>(null);
 
   const [policy, setPolicy] = useState<null | ServerDetail["server"]["policy"]>(null);
+  const [editorLimitMb, setEditorLimitMb] = useState<number | null>(null);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "VIEWER" });
@@ -83,7 +85,12 @@ export default function SettingsPage() {
     if (!activeId || !policy) return;
     setBusy("policy");
     try {
-      await apiPatch(`/api/servers/${activeId}`, { policy });
+      const ceilingMb = Math.round((detail.data?.server.editorCeilingBytes ?? 64 * 1024 * 1024) / 1024 / 1024);
+      const maxFileBytes =
+        editorLimitMb === null
+          ? undefined
+          : Math.max(1, Math.min(Math.round(editorLimitMb), ceilingMb)) * 1024 * 1024;
+      await apiPatch(`/api/servers/${activeId}`, maxFileBytes === undefined ? { policy } : { policy, maxFileBytes });
       push("Server policy saved", "ok");
       await detail.refresh();
     } catch (error) {
@@ -122,6 +129,9 @@ export default function SettingsPage() {
   };
 
   const currentPolicy = policy ?? detail.data?.server.policy ?? null;
+  const currentEditorLimitMb =
+    editorLimitMb ?? Math.round((detail.data?.server.maxFileBytes ?? 16 * 1024 * 1024) / 1024 / 1024);
+  const editorCeilingMb = Math.round((detail.data?.server.editorCeilingBytes ?? 64 * 1024 * 1024) / 1024 / 1024);
 
   return (
     <>
@@ -271,6 +281,15 @@ export default function SettingsPage() {
                   value={String(currentPolicy.maxScanFiles)}
                   onChange={(value) => setPolicy({ ...currentPolicy, maxScanFiles: Number(value) || 2500 })}
                 />
+                <Field
+                  label={`Editor file limit (MB) — ceiling ${editorCeilingMb} MB`}
+                  value={String(currentEditorLimitMb)}
+                  onChange={(value) => setEditorLimitMb(Number(value.replace(/[^0-9]/g, "")) || 1)}
+                />
+                <div className="text-[10px] leading-relaxed text-slate-600">
+                  Files up to this size open in the chunked editor and are backed up server-side before every write. The
+                  process-wide ceiling is set by DARKNOTE_MAX_EDITOR_BYTES.
+                </div>
                 <div className="text-[10px] leading-relaxed text-slate-600">
                   Ignored folders: {currentPolicy.ignore.join(", ")}
                 </div>

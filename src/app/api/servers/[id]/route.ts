@@ -3,6 +3,7 @@ import { route, ok } from '@/lib/api';
 import { assertServerAccess, deleteServer, updateServer } from '@/lib/servers/repo';
 import { logActivity } from '@/lib/audit';
 import { serverPolicyView, serverStateView } from '@/lib/views';
+import { maxEditorCeiling } from '@/lib/pterodactyl/client';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -30,6 +31,7 @@ const patchSchema = z.object({
   autoRestart: z.boolean().optional(),
   atomicWrites: z.boolean().optional(),
   startupTimeoutS: z.number().int().min(15).max(600).optional(),
+  maxFileBytes: z.number().int().min(65536).max(256 * 1024 * 1024).optional(),
   syncMode: z.enum(['polling', 'events']).optional(),
   syncIntervalS: z.number().int().min(60).max(86400).optional(),
   isActive: z.boolean().optional(),
@@ -60,6 +62,8 @@ export const GET = route<Params>({ permission: 'file.read' }, async ({ user, par
       autoRestart: server.autoRestart,
       atomicWrites: server.atomicWrites,
       startupTimeoutS: server.startupTimeoutS,
+      maxFileBytes: server.maxFileBytes,
+      editorCeilingBytes: maxEditorCeiling(),
       syncMode: server.syncMode,
       syncIntervalS: server.syncIntervalS,
       policy: serverPolicyView(server),
@@ -82,6 +86,7 @@ export const PATCH = route<Params>({ permission: 'server.manage' }, async ({ use
     allowedExtensions: patch.allowedExtensions,
     autoRestart: patch.autoRestart ?? patch.policy?.autoRestart,
     atomicWrites: patch.atomicWrites,
+    maxFileBytes: patch.maxFileBytes,
     startupTimeoutS:
       patch.startupTimeoutS ??
       (patch.policy?.healthTimeoutMs ? Math.max(15, Math.round(patch.policy.healthTimeoutMs / 1000)) : undefined),

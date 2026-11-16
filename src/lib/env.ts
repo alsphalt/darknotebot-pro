@@ -43,6 +43,20 @@ export const env = {
   maxIndexFiles: Number(process.env.DARKNOTE_MAX_INDEX_FILES ?? 4000),
   maxIndexDepth: Number(process.env.DARKNOTE_MAX_INDEX_DEPTH ?? 10),
   maxDownloadBytes: Number(process.env.DARKNOTE_MAX_DOWNLOAD_BYTES ?? 96 * 1024 * 1024),
+
+  /**
+   * Hard process ceiling for opening/editing a single text file. Per-server
+   * limits (connected_servers.max_file_bytes) may be lower but can never exceed
+   * this. The old build hard-coded a 2 MB ceiling; that is gone.
+   */
+  maxEditorBytes: Number(process.env.DARKNOTE_MAX_EDITOR_BYTES ?? 64 * 1024 * 1024),
+  /** Size of one chunk the browser asks for / uploads. */
+  editorChunkBytes: Math.max(
+    64 * 1024,
+    Math.min(Number(process.env.DARKNOTE_EDITOR_CHUNK_BYTES ?? 512 * 1024), 8 * 1024 * 1024),
+  ),
+  /** Never mirror a file larger than this into the SQL content cache. */
+  maxSqlContentCacheBytes: Number(process.env.DARKNOTE_MAX_SQL_CACHE_BYTES ?? 1024 * 1024),
   maxSearchResults: Number(process.env.DARKNOTE_MAX_SEARCH_RESULTS ?? 400),
 
   trustProxy: process.env.DARKNOTE_TRUST_PROXY === '1',

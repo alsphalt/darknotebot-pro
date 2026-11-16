@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { route, ok, ApiError } from '@/lib/api';
 import { assertServerAccess } from '@/lib/servers/repo';
 import { deployChanges, listDeployments } from '@/lib/services/deploy';
-import { query } from '@/lib/db';
+import { query, queryOne } from '@/lib/db';
 import { publicId, toUiStatus, healthOk } from '@/lib/deploy-view';
 
 export const runtime = 'nodejs';
@@ -68,21 +68,31 @@ export const GET = route({ permission: 'file.read' }, async ({ req, user }) => {
   });
 });
 
-const deploySchema = z.object({
-  serverId: z.string().min(1),
-  files: z
-    .array(
-      z.object({
-        path: z.string().min(1),
-        content: z.string(),
-        expectedSha: z.string().nullable().optional(),
-      }),
-    )
-    .min(1)
-    .max(200),
-  message: z.string().max(500).optional(),
-  restartMode: z.enum(['auto', 'always', 'never']).optional(),
-});
+const deploySchema = z
+  .object({
+    serverId: z.string().min(1),
+    /**
+     * Preferred for large edits: deploy the server-side draft by id instead of
+     * re-uploading a multi-megabyte string from the browser.
+     */
+    draftId: z.string().min(1).optional(),
+    files: z
+      .array(
+        z.object({
+          path: z.string().min(1),
+          content: z.string(),
+          expectedSha: z.string().nullable().optional(),
+        }),
+      )
+      .min(1)
+      .max(200)
+      .optional(),
+    message: z.string().max(500).optional(),
+    restartMode: z.enum(['auto', 'always', 'never']).optional(),
+  })
+  .refine((value) => Boolean(value.draftId) !== Boolean(value.files?.length), {
+    message: 'Provide either draftId or files (not both).',
+  });
 
 /**
  * The single write path to production: validate → backup → write → verify →
@@ -92,15 +102,50 @@ export const POST = route({ permission: 'deploy' }, async ({ user, body }) => {
   const input = await body(deploySchema);
   const server = await assertServerAccess(user, input.serverId, 'deploy');
 
-  const outcome = await deployChanges({
-    server,
-    user,
-    changes: input.files.map((file) => ({
+  let changes: Array<{ path: string; content: string; expectedHash: string | null; note?: string }>;
+  if (input.draftId) {
+    const draft = await queryOne<{
+      id: string;
+      path: string;
+      content: string;
+      base_sha256: string | null;
+      status: string;
+      user_id: string | null;
+    }>('select id, path, content, base_sha256, status, user_id from editor_drafts where id = $1 and server_id = $2', [
+      input.draftId,
+      server.id,
+    ]);
+    if (!draft) throw new ApiError('Draft not found for this server.', 404, 'draft_not_found');
+    if (draft.status === 'uploading') {
+      throw new ApiError('This draft is still uploading. Finish the chunked save first.', 409, 'draft_incomplete');
+    }
+    if (draft.status === 'deployed') {
+      throw new ApiError('This draft was already deployed. Re-open the file to start a new edit.', 409, 'draft_deployed');
+    }
+    if (draft.user_id && draft.user_id !== user.id) {
+      throw new ApiError('That draft belongs to another user.', 403, 'draft_forbidden');
+    }
+    changes = [
+      {
+        path: draft.path,
+        content: draft.content,
+        expectedHash: draft.base_sha256,
+        note: input.message,
+      },
+    ];
+  } else {
+    changes = (input.files ?? []).map((file) => ({
       path: file.path,
       content: file.content,
       expectedHash: file.expectedSha ?? null,
       note: input.message,
-    })),
+    }));
+  }
+
+  const outcome = await deployChanges({
+    server,
+    user,
+    changes,
     note: input.message,
     restartMode: input.restartMode ?? 'auto',
   });

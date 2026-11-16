@@ -27,6 +27,16 @@ export interface RemoteFileSnapshot {
   secret: boolean;
 }
 
+/**
+ * Effective editor limit for a server: the per-server setting, clamped by the
+ * process ceiling. The old build multiplied a 512 KB default by four and called
+ * the result a hard 2 MB limit.
+ */
+export function editorLimitFor(server: ServerRecord): number {
+  const perServer = Number(server.maxFileBytes) > 0 ? Number(server.maxFileBytes) : 16 * 1024 * 1024;
+  return Math.max(64 * 1024, Math.min(perServer, env.maxEditorBytes));
+}
+
 export async function remoteStat(
   client: PterodactylClient,
   filePath: string,
@@ -58,7 +68,7 @@ export async function fetchRemoteFile(
     );
   }
   const client = await serverClient(server);
-  const maxBytes = options.maxBytes ?? Math.max(server.maxFileBytes, 1) * 4;
+  const maxBytes = options.maxBytes ?? editorLimitFor(server);
   const content = await client.readFile(target, maxBytes);
   const stat = options.withStat === false ? null : await remoteStat(client, target);
   return {
@@ -110,6 +120,82 @@ export async function cachedFileContent(
     'select content, sha256, bytes, fetched_at from file_contents where server_id = $1 and path = $2',
     [serverId, filePath],
   );
+}
+
+/**
+ * Short-lived in-process cache for full file text.
+ *
+ * Pterodactyl's `/files/contents` has no range support, so a 20 MB file costs one
+ * 20 MB download and is then served to the browser as slices. Keeping the copy
+ * here (not in the SQL `file_contents` table) means chunked reading never writes
+ * giant blobs into Postgres.
+ */
+interface ReadCacheEntry {
+  content: string;
+  sha256: string;
+  sizeBytes: number;
+  modifiedAt: string | null;
+  secret: boolean;
+  fetchedAt: number;
+}
+
+const READ_TTL_MS = 90_000;
+const READ_MAX_ENTRIES = 8;
+const readCache = new Map<string, ReadCacheEntry>();
+
+function readCacheKey(serverId: string, filePath: string): string {
+  return `${serverId}\u0000${filePath}`;
+}
+
+export function invalidateReadCache(serverId: string, filePath?: string): void {
+  if (filePath) {
+    readCache.delete(readCacheKey(serverId, filePath));
+    return;
+  }
+  for (const key of readCache.keys()) {
+    if (key.startsWith(`${serverId}\u0000`)) readCache.delete(key);
+  }
+}
+
+function pruneReadCache(): void {
+  const budget = Math.max(env.maxDownloadBytes, 64 * 1024 * 1024);
+  let total = 0;
+  const entries = [...readCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+  for (const [, entry] of entries) total += entry.sizeBytes;
+  for (const [key, entry] of entries) {
+    if (readCache.size <= READ_MAX_ENTRIES && total <= budget) break;
+    readCache.delete(key);
+    total -= entry.sizeBytes;
+  }
+}
+
+export async function readFileCached(
+  server: ServerRecord,
+  filePath: string,
+  options: { maxBytes?: number; force?: boolean } = {},
+): Promise<ReadCacheEntry> {
+  const target = confineToRoot(server.projectRoot, filePath);
+  const key = readCacheKey(server.id, target);
+  const existing = readCache.get(key);
+  if (!options.force && existing && Date.now() - existing.fetchedAt < READ_TTL_MS) {
+    return existing;
+  }
+  const snapshot = await fetchRemoteFile(server, target, {
+    maxBytes: options.maxBytes ?? editorLimitFor(server),
+    withStat: true,
+  });
+  const entry: ReadCacheEntry = {
+    content: snapshot.content,
+    sha256: snapshot.sha256,
+    sizeBytes: snapshot.sizeBytes,
+    modifiedAt: snapshot.modifiedAt,
+    secret: snapshot.secret,
+    fetchedAt: Date.now(),
+  };
+  readCache.delete(key);
+  readCache.set(key, entry);
+  pruneReadCache();
+  return entry;
 }
 
 export interface IndexEntry {
@@ -268,8 +354,11 @@ async function verifyRemoteHash(
   client: PterodactylClient,
   filePath: string,
   expected: string,
+  maxBytes = env.maxEditorBytes,
 ): Promise<void> {
-  const readBack = await client.readFile(filePath, 64 * 1024 * 1024);
+  // Verify against the full process ceiling, not the editor limit: a file that
+  // was just written must be proven byte-for-byte.
+  const readBack = await client.readFile(filePath, Math.max(maxBytes, env.maxEditorBytes));
   const actual = sha256(readBack);
   if (actual !== expected) {
     throw new ApiError(
@@ -318,7 +407,7 @@ export async function writeProductionFile(options: {
   const client = await serverClient(server);
   let current: string;
   try {
-    current = await client.readFile(target, Math.max(server.maxFileBytes, 1) * 4);
+    current = await client.readFile(target, editorLimitFor(server));
   } catch (error) {
     if (error instanceof Error && /status 404|not found/i.test(error.message)) current = '';
     else throw error;
@@ -413,7 +502,12 @@ export async function writeProductionFile(options: {
     secret: false,
     accessError: null,
   });
-  await cacheFileContent(server.id, target, newHash, options.content);
+  invalidateReadCache(server.id, target);
+  // Mirror only small files into SQL. Large files are read from the panel and
+  // cached in memory; a 20 MB row would slow every query for no benefit.
+  if (Buffer.byteLength(options.content, 'utf8') <= env.maxSqlContentCacheBytes) {
+    await cacheFileContent(server.id, target, newHash, options.content);
+  }
   await query(
     `update editor_drafts set status = 'deployed', updated_at = now()
      where server_id = $1 and path = $2 and status in ('draft','conflict')`,
@@ -432,7 +526,9 @@ export async function validateContent(
   const warnings: string[] = [];
   const ext = baseName(filePath).split('.').pop()?.toLowerCase() ?? '';
   const bytes = Buffer.byteLength(content, 'utf8');
-  if (bytes > 8 * 1024 * 1024) errors.push('File exceeds the 8 MB editor limit');
+  if (bytes > env.maxEditorBytes) {
+    errors.push(`File is ${Math.round(bytes / 1024)} KB — above the ${Math.round(env.maxEditorBytes / 1024 / 1024)} MB process ceiling`);
+  }
   if (content.includes('\0')) errors.push('File contains null bytes and is not valid text');
 
   if (ext === 'json') {
@@ -457,8 +553,14 @@ export async function validateContent(
       }
       void scriptError;
     }
-    // Node's own parser catches module/CommonJS issues acorn tolerates.
+    // Node's own parser catches module/CommonJS issues acorn tolerates. It is
+    // skipped for multi-megabyte files: writing a 20 MB temp file and spawning a
+    // second parser adds seconds to every save, and acorn has already parsed it.
     try {
+      if (bytes > 4 * 1024 * 1024) {
+        warnings.push('Large file — syntax verified with the acorn parser only (node --check skipped).');
+        throw new Error('__skipped_large_file__');
+      }
       ensureDataDirs();
       const tmpDir = path.join(env.uploadDir, 'validate');
       await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
@@ -479,13 +581,15 @@ export async function validateContent(
         errors.push(`node --check failed: ${result.stderr.split('\n').slice(0, 4).join(' ').trim()}`);
       }
     } catch (error) {
-      warnings.push(
-        `Could not run node --check locally: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (!(error instanceof Error && error.message === '__skipped_large_file__')) {
+        warnings.push(
+          `Could not run node --check locally: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
-  if (content.length > 1_500_000) warnings.push('Very large file — editor performance may degrade');
+  if (bytes > 1_500_000) warnings.push('Very large file — the editor uses its large-file profile.');
   return { ok: errors.length === 0, errors, warnings };
 }
 

@@ -42,21 +42,186 @@ type Tab = {
   modifiedAt: string | null;
   dirty: boolean;
   draftSaved: boolean;
-  validation: { ok: boolean; errors: Array<{ line: number; message: string }> };
+  validation: { ok: boolean; errors: Array<{ line: number; message: string }>; pending?: boolean };
+  /** Bytes of the production file as reported by the panel. */
+  sizeBytes: number | null;
+  /** Per-server editor limit, already clamped by the process ceiling. */
+  limitBytes: number | null;
+  /** True when the file was loaded through the chunked reader. */
+  large: boolean;
+  /** Server-side draft id, set once a large draft has been stored. */
+  draftId: string | null;
+};
+
+type DraftRef = {
+  id: string;
+  content: string | null;
+  bytes: number;
+  truncated: boolean;
+  baseSha: string | null;
+  updatedAt: string;
 };
 
 type FilePayload = {
   path: string;
-  content: string;
+  content: string | null;
   sha256: string;
   language: string;
   modifiedAt: string | null;
+  sizeBytes: number;
+  totalChars: number;
+  limitBytes: number;
+  ceilingBytes: number;
+  chunkBytes: number;
+  largeFile: boolean;
   indexedSha: string | null;
   inSync: boolean;
-  draft: { content: string; baseSha: string | null; updatedAt: string } | null;
-  validation: { ok: boolean; errors: Array<{ line: number; message: string }> };
+  draft: DraftRef | null;
+  validation?: { ok: boolean; errors: Array<{ line: number; message: string }> };
   secretKind: string | null;
 };
+
+/** Above this size the editor switches to the chunked reader/writer path. */
+const LARGE_FILE_BYTES = 1_024 * 1_024;
+const LARGE_FILE_BYTES_FOR_MONACO = 2 * 1_024 * 1_024;
+
+function formatSize(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+/** UTF-8 byte length without allocating a copy of a multi-megabyte string. */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+async function sha256Hex(text: string): Promise<string | null> {
+  try {
+    if (typeof crypto === "undefined" || !crypto.subtle) return null;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    // Non-secure contexts have no subtle crypto; the server still verifies size
+    // and the deploy step re-reads production and compares SHA-256.
+    return null;
+  }
+}
+
+type ChunkPayload = FilePayload & { offset: number; length: number; nextOffset: number | null; content: string | null };
+
+/** Pull a production file one slice at a time and prove nothing was lost. */
+async function readFileInChunks(
+  serverId: string,
+  meta: FilePayload,
+  onProgress?: (done: number, total: number) => void,
+): Promise<string> {
+  const parts: string[] = [];
+  let offset = 0;
+  let received = 0;
+  for (let guard = 0; guard < 100_000; guard += 1) {
+    const chunk = await apiGet<ChunkPayload>(
+      `/api/files/content?serverId=${serverId}&path=${encodeURIComponent(meta.path)}&mode=chunk&offset=${offset}&length=${meta.chunkBytes}`,
+    );
+    const text = chunk.content ?? "";
+    parts.push(text);
+    received += text.length;
+    onProgress?.(received, meta.totalChars);
+    if (chunk.nextOffset === null) break;
+    if (chunk.nextOffset <= offset) throw new Error("The chunked reader stalled — the file was not loaded.");
+    offset = chunk.nextOffset;
+  }
+  const content = parts.join("");
+  if (content.length !== meta.totalChars) {
+    throw new Error(
+      `Loaded ${content.length} of ${meta.totalChars} characters — the file was not opened to avoid showing truncated content.`,
+    );
+  }
+  return content;
+}
+
+/** Pull a server-side draft one slice at a time. */
+async function readDraftInChunks(
+  serverId: string,
+  path: string,
+  draftId: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<string> {
+  const parts: string[] = [];
+  let offset = 0;
+  let received = 0;
+  let totalChars = 0;
+  for (let guard = 0; guard < 100_000; guard += 1) {
+    const chunk = await apiGet<ChunkPayload>(
+      `/api/drafts/chunk?serverId=${serverId}&draftId=${encodeURIComponent(draftId)}&mode=chunk&offset=${offset}`,
+    );
+    totalChars = chunk.totalChars;
+    const text = chunk.content ?? "";
+    parts.push(text);
+    received += text.length;
+    onProgress?.(received, totalChars);
+    if (chunk.nextOffset === null) break;
+    if (chunk.nextOffset <= offset) throw new Error("The draft reader stalled — the draft was not restored.");
+    offset = chunk.nextOffset;
+  }
+  void path;
+  const content = parts.join("");
+  if (content.length !== totalChars) {
+    throw new Error(`Restored ${content.length} of ${totalChars} characters of the draft.`);
+  }
+  return content;
+}
+
+type ChunkCreateResponse = { draftId: string; chunkBytes: number; chunks: number; totalBytes: number };
+
+/**
+ * Store a draft through the chunked endpoint: create → PUT each slice →
+ * finalize. The browser never posts the whole file in one request, which is what
+ * used to kill the editor on mobile for anything past a couple of megabytes.
+ */
+async function uploadDraftInChunks(
+  serverId: string,
+  path: string,
+  content: string,
+  baseSha: string | null,
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ draftId: string; bytes: number; sha256: string | null }> {
+  const totalBytes = utf8Length(content);
+  const created = await apiPost<ChunkCreateResponse>("/api/drafts/chunk", {
+    action: "create",
+    serverId,
+    path,
+    totalBytes,
+    totalChars: content.length,
+    baseSha,
+  });
+  const step = Math.max(64 * 1024, created.chunkBytes);
+  const total = Math.ceil(content.length / step) || 1;
+  for (let index = 0; index < total; index += 1) {
+    const slice = content.slice(index * step, (index + 1) * step);
+    await apiPut("/api/drafts/chunk", { serverId, draftId: created.draftId, index, content: slice });
+    onProgress?.(index + 1, total);
+  }
+  const sha = await sha256Hex(content);
+  const finalized = await apiPost<{ draftId: string; bytes: number; sha256: string }>("/api/drafts/chunk", {
+    action: "finalize",
+    serverId,
+    draftId: created.draftId,
+    sha256: sha ?? undefined,
+  });
+  return { draftId: finalized.draftId, bytes: finalized.bytes, sha256: finalized.sha256 ?? sha };
+}
 
 function EditorView() {
   const params = useSearchParams();
@@ -76,51 +241,88 @@ function EditorView() {
   const [deploying, setDeploying] = useState(false);
   const [deployNote, setDeployNote] = useState("");
   const [openPath, setOpenPath] = useState("");
-  const [draftBanner, setDraftBanner] = useState<{ path: string; content: string; baseSha: string | null } | null>(null);
+  const [draftBanner, setDraftBanner] = useState<{ path: string; content: string; baseSha: string | null; draftId: string | null } | null>(null);
   const [conflict, setConflict] = useState<{ message: string; details?: unknown } | null>(null);
+  const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const decorationsRef = useRef<any>(null);
+  const validateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const current = tabs.find((tab) => tab.path === active) ?? null;
 
   const openFile = useCallback(
-    async (path: string, line = 0) => {
+    async (path: string, line = 0, options: { fresh?: boolean } = {}) => {
       if (!activeId || !path) return;
-      if (tabs.some((tab) => tab.path === path)) {
+      if (!options.fresh && tabs.some((tab) => tab.path === path)) {
         setActive(path);
         if (line > 0) revealLine(line);
         return;
       }
       setLoading(true);
       setError(null);
+      setProgress({ label: "Reading file…", done: 0, total: 0 });
       try {
-        const data = await apiGet<FilePayload>(
-          `/api/files/content?serverId=${activeId}&path=${encodeURIComponent(path)}`,
-        );
+        const query = `serverId=${activeId}&path=${encodeURIComponent(path)}`;
+        // Metadata first: it tells us the real size and limit without shipping it.
+        const meta = await apiGet<FilePayload>(`/api/files/content?${query}&mode=meta${options.fresh ? "&fresh=1" : ""}`);
+
+        let content: string;
+        let validation: { ok: boolean; errors: Array<{ line: number; message: string }>; pending?: boolean };
+        if (meta.sizeBytes > LARGE_FILE_BYTES) {
+          content = await readFileInChunks(activeId, meta, (done, total) =>
+            setProgress({ label: "Loading large file", done, total }),
+          );
+          // Parsing several megabytes on load would block the main thread, so the
+          // full check runs server-side at deploy time instead.
+          validation = { ok: true, errors: [], pending: true };
+        } else {
+          const full = await apiGet<FilePayload>(`/api/files/content?${query}&mode=full`);
+          content = full.content ?? "";
+          validation = full.validation ?? { ok: true, errors: [] };
+        }
+
         const tab: Tab = {
-          path: data.path,
-          content: data.content,
-          original: data.content,
-          sha: data.sha256,
-          indexedSha: data.indexedSha,
-          language: data.language,
-          modifiedAt: data.modifiedAt,
+          path: meta.path,
+          content,
+          original: content,
+          sha: meta.sha256,
+          indexedSha: meta.indexedSha,
+          language: meta.language,
+          modifiedAt: meta.modifiedAt,
           dirty: false,
           draftSaved: false,
-          validation: data.validation,
+          validation,
+          sizeBytes: meta.sizeBytes,
+          limitBytes: meta.limitBytes,
+          large: meta.sizeBytes > LARGE_FILE_BYTES,
+          draftId: meta.draft?.id ?? null,
         };
-        setTabs((list) => [...list, tab]);
-        setActive(data.path);
-        if (data.draft) {
-          setDraftBanner({ path: data.path, content: data.draft.content, baseSha: data.draft.baseSha });
+        setTabs((list) => (options.fresh ? list.map((item) => (item.path === meta.path ? tab : item)) : [...list, tab]));
+        setActive(meta.path);
+
+        if (meta.draft) {
+          let draftContent = meta.draft.content;
+          if (draftContent === null) {
+            draftContent = await readDraftInChunks(activeId, meta.path, meta.draft.id, (done, total) =>
+              setProgress({ label: "Loading stored draft", done, total }),
+            );
+          }
+          setDraftBanner({
+            path: meta.path,
+            content: draftContent,
+            baseSha: meta.draft.baseSha,
+            draftId: meta.draft.id,
+          });
         }
         if (line > 0) setTimeout(() => revealLine(line), 350);
       } catch (err) {
         setError(errorMessage(err));
       } finally {
         setLoading(false);
+        setProgress(null);
       }
     },
     [activeId, tabs],
@@ -151,45 +353,125 @@ function EditorView() {
 
   const update = (content: string) => {
     if (!active) return;
+    const path = active;
     setTabs((list) =>
       list.map((tab) =>
-        tab.path === active
+        tab.path === path
           ? {
               ...tab,
               content,
               dirty: content !== tab.original,
               draftSaved: false,
-              validation: tab.language === "javascript" || tab.language === "typescript"
-                ? quickValidate(content)
-                : { ok: true, errors: [] },
+              // A stored draft id is only valid for the bytes it was created from.
+              draftId: content === tab.content ? tab.draftId : null,
             }
           : tab,
       ),
     );
+    // The old code walked the whole string on every keystroke. On a 20 MB file
+    // that locks up mobile browsers, so validation is debounced and skipped for
+    // large files (deploy still parses them server-side).
+    if (validateTimer.current) clearTimeout(validateTimer.current);
+    validateTimer.current = setTimeout(() => {
+      setTabs((list) =>
+        list.map((tab) => {
+          if (tab.path !== path) return tab;
+          if (tab.large || content.length > 400_000) {
+            return { ...tab, validation: { ok: true, errors: [], pending: true } };
+          }
+          if (tab.language !== "javascript" && tab.language !== "typescript") {
+            return { ...tab, validation: { ok: true, errors: [] } };
+          }
+          return { ...tab, validation: quickValidate(content) };
+        }),
+      );
+    }, 450);
   };
 
   const saveDraft = async () => {
-    if (!current) return;
+    if (!current || !activeId) return;
+    setSaving(true);
     try {
-      await apiPut("/api/drafts", { serverId: activeId, path: current.path, content: current.content, baseSha: current.sha });
-      setTabs((list) => list.map((tab) => (tab.path === current.path ? { ...tab, draftSaved: true } : tab)));
-      push("Draft saved — production is untouched", "ok");
+      const bytes = utf8Length(current.content);
+      if (current.limitBytes && bytes > current.limitBytes) {
+        throw new Error(
+          `This file is ${formatSize(bytes)} — above the ${formatSize(current.limitBytes)} editor limit for this server. Raise “Editor file limit” in Settings or edit it over SFTP.`,
+        );
+      }
+      if (bytes > LARGE_FILE_BYTES) {
+        setProgress({ label: "Uploading large draft", done: 0, total: 0 });
+        const stored = await uploadDraftInChunks(activeId, current.path, current.content, current.sha, (done, total) =>
+          setProgress({ label: "Uploading large draft", done, total }),
+        );
+        setTabs((list) =>
+          list.map((tab) =>
+            tab.path === current.path
+              ? { ...tab, draftSaved: true, draftId: stored.draftId, sizeBytes: stored.bytes }
+              : tab,
+          ),
+        );
+        push(`Draft stored server-side (${formatSize(stored.bytes)}) — production is untouched`, "ok");
+      } else {
+        await apiPut("/api/drafts", {
+          serverId: activeId,
+          path: current.path,
+          content: current.content,
+          baseSha: current.sha,
+        });
+        setTabs((list) => list.map((tab) => (tab.path === current.path ? { ...tab, draftSaved: true } : tab)));
+        push("Draft saved — production is untouched", "ok");
+      }
     } catch (err) {
       push(errorMessage(err), "error");
+    } finally {
+      setSaving(false);
+      setProgress(null);
     }
   };
 
   const deploy = async () => {
-    if (!current) return;
+    if (!current || !activeId) return;
     setDeploying(true);
     try {
-      const result = await apiPost<{ deployment: { publicId: string; status: string; healthOk: boolean | null; error: string | null } }>(
+      const bytes = utf8Length(current.content);
+      // A large file is never posted as one body: it is stored as a server-side
+      // draft first and the deployment then references that draft by id.
+      let draftId = current.draftSaved ? current.draftId : null;
+      if (!draftId && bytes > LARGE_FILE_BYTES) {
+        setProgress({ label: "Storing draft before deploy", done: 0, total: 0 });
+        const stored = await uploadDraftInChunks(activeId, current.path, current.content, current.sha, (done, total) =>
+          setProgress({ label: "Storing draft before deploy", done, total }),
+        );
+        draftId = stored.draftId;
+        setTabs((list) =>
+          list.map((tab) =>
+            tab.path === current.path ? { ...tab, draftSaved: true, draftId: stored.draftId } : tab,
+          ),
+        );
+      }
+      const body = draftId
+        ? {
+            serverId: activeId,
+            draftId,
+            message: deployNote || `Edit ${current.path} from the control center`,
+          }
+        : {
+            serverId: activeId,
+            files: [{ path: current.path, content: current.content, expectedSha: current.sha }],
+            message: deployNote || `Edit ${current.path} from the control center`,
+          };
+
+      const result = await apiPost<{
+        deployment: {
+          publicId: string;
+          status: string;
+          healthOk: boolean | null;
+          error: string | null;
+          files: Array<{ path: string; postHash: string | null }>;
+        };
+      }>(
         "/api/deployments",
-        {
-          serverId: activeId,
-          files: [{ path: current.path, content: current.content, expectedSha: current.sha }],
-          message: deployNote || `Edit ${current.path} from the control center`,
-        },
+        body,
       );
       const deployment = result.deployment;
       if (deployment.status === "SUCCEEDED") {
@@ -197,7 +479,19 @@ function EditorView() {
         await apiDelete(`/api/drafts?serverId=${activeId}&path=${encodeURIComponent(current.path)}`).catch(() => undefined);
         setTabs((list) =>
           list.map((tab) =>
-            tab.path === current.path ? { ...tab, original: tab.content, dirty: false, draftSaved: false } : tab,
+            tab.path === current.path
+              ? {
+                  ...tab,
+                  // The deployment reports the hash it re-read from production,
+                  // so later conflict checks compare against real bytes.
+                  sha: deployment.files.find((file) => file.path === tab.path)?.postHash ?? tab.sha,
+                  original: tab.content,
+                  dirty: false,
+                  draftSaved: false,
+                  draftId: null,
+                  sizeBytes: utf8Length(tab.content),
+                }
+              : tab,
           ),
         );
         router.refresh();
@@ -215,6 +509,7 @@ function EditorView() {
       }
     } finally {
       setDeploying(false);
+      setProgress(null);
     }
   };
 
@@ -349,6 +644,25 @@ function EditorView() {
         <div className="mb-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">{error}</div>
       )}
 
+      {progress && (
+        <div className="mb-2 rounded-lg border border-cyber/30 bg-cyber/5 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 text-[11px] text-cyber">
+            <span className="flex items-center gap-1.5"><Spinner /> {progress.label}…</span>
+            <span className="text-cyber/80">
+              {progress.total > 0
+                ? `${Math.min(100, Math.round((progress.done / progress.total) * 100))}% · ${progress.done.toLocaleString()} / ${progress.total.toLocaleString()}`
+                : "starting"}
+            </span>
+          </div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink-800">
+            <div
+              className="h-full bg-cyber transition-all"
+              style={{ width: `${progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 8}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {draftBanner && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-[11px] text-violet-200">
           <span>A local draft exists for <span className="mono">{draftBanner.path}</span>.</span>
@@ -358,7 +672,17 @@ function EditorView() {
               setTabs((list) =>
                 list.map((tab) =>
                   tab.path === draftBanner.path
-                    ? { ...tab, content: draftBanner.content, dirty: draftBanner.content !== tab.original, draftSaved: true }
+                    ? {
+                        ...tab,
+                        content: draftBanner.content,
+                        dirty: draftBanner.content !== tab.original,
+                        draftSaved: true,
+                        draftId: draftBanner.draftId,
+                        validation:
+                          tab.language === "javascript" || tab.language === "typescript"
+                            ? quickValidate(draftBanner.content)
+                            : { ok: true, errors: [] },
+                      }
                     : tab,
                 ),
               );
@@ -393,19 +717,28 @@ function EditorView() {
                   <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
                     <span>sha {current.sha?.slice(0, 10) ?? "—"}</span>
                     <span>·</span>
+                    <span>{formatSize(current.sizeBytes)}</span>
+                    {current.limitBytes ? (
+                      <>
+                        <span>·</span>
+                        <span>limit {formatSize(current.limitBytes)}</span>
+                      </>
+                    ) : null}
+                    <span>·</span>
                     <span>{relative(current.modifiedAt)}</span>
+                    {current.large ? <Badge tone="cyber">large file mode</Badge> : null}
                     {current.dirty ? <Badge tone="warn">unsaved</Badge> : current.draftSaved ? <Badge tone="accent">draft</Badge> : <Badge tone="good">production</Badge>}
                     {current.indexedSha && current.sha && current.indexedSha !== current.sha && <Badge tone="warn">index stale</Badge>}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <button className="btn-ghost !px-2 !py-1 text-[10px]" onClick={() => void saveDraft()} disabled={!current.dirty}>
-                    <Save className="h-3 w-3" /> Draft
+                  <button className="btn-ghost !px-2 !py-1 text-[10px]" onClick={() => void saveDraft()} disabled={!current.dirty || saving}>
+                    {saving ? <Spinner /> : <Save className="h-3 w-3" />} Draft
                   </button>
                   <button
                     className="btn-ghost !px-2 !py-1 text-[10px]"
-                    onClick={() => current && void openFile(current.path)}
-                    title="Re-read production"
+                    onClick={() => current && void openFile(current.path, 0, { fresh: true })}
+                    title="Re-read production from the panel"
                   >
                     <RotateCcw className="h-3 w-3" /> Reload
                   </button>
@@ -435,23 +768,32 @@ function EditorView() {
                     if (lineParam > 0) setTimeout(() => revealLine(lineParam), 200);
                   }}
                   options={{
-                    minimap: { enabled: typeof window !== "undefined" && window.innerWidth > 1100 },
+                    // Chunked loading keeps memory bounded, but a very large model
+                    // still needs the trimmed feature set to stay responsive on
+                    // phones and low-end laptops.
+                    largeFileOptimizations: true,
+                    occurrencesHighlight: current.large ? "off" : "singleFile",
+                    minimap: { enabled: !current.large && typeof window !== "undefined" && window.innerWidth > 1100 },
                     fontSize: typeof window !== "undefined" && window.innerWidth < 640 ? 12 : 13,
                     fontFamily: "var(--font-mono)",
-                    wordWrap: typeof window !== "undefined" && window.innerWidth < 640 ? "on" : "off",
+                    wordWrap: !current.large && typeof window !== "undefined" && window.innerWidth < 640 ? "on" : "off",
                     lineNumbers: "on",
-                    folding: true,
+                    folding: !current.large,
                     autoIndent: "full",
-                    bracketPairColorization: { enabled: true },
-                    matchBrackets: "always",
+                    bracketPairColorization: { enabled: !current.large },
+                    matchBrackets: current.large ? "never" : "always",
                     automaticLayout: true,
                     tabSize: 2,
                     scrollBeyondLastLine: false,
                     smoothScrolling: true,
                     padding: { top: 10, bottom: 24 },
-                    quickSuggestions: true,
-                    suggestOnTriggerCharacters: true,
+                    quickSuggestions: !current.large,
+                    suggestOnTriggerCharacters: !current.large,
+                    wordBasedSuggestions: current.large ? "off" : "currentDocument",
+                    codeLens: false,
                     renderWhitespace: "selection",
+                    maxTokenizationLineLength: current.large ? 2000 : 20000,
+                    renderLineHighlight: current.large ? "none" : "line",
                     stickyScroll: { enabled: false },
                   }}
                 />
@@ -475,7 +817,9 @@ function EditorView() {
         {!fullscreen && (
           <div className="space-y-3">
             <Panel title="Validation" bodyClassName="!py-3">
-              {current?.validation.ok ? (
+              {current?.validation.pending ? (
+                <p className="flex items-center gap-2 text-xs text-amber-300"><AlertTriangle className="h-3.5 w-3.5" /> Parsed on deploy</p>
+              ) : current?.validation.ok ? (
                 <p className="flex items-center gap-2 text-xs text-emerald-300"><CheckCircle2 className="h-3.5 w-3.5" /> Parses cleanly</p>
               ) : current ? (
                 <ul className="space-y-1 text-[11px] text-rose-300">
@@ -550,7 +894,7 @@ function EditorView() {
           <div className="space-y-2">
             <p className="mono text-[11px] text-slate-300">{current?.path}</p>
             <p>This writes the file on Pterodactyl, verifies the stored SHA-256, then restarts the bot and watches startup output.</p>
-            {current && !current.validation.ok && (
+            {current && !current.validation.ok && !current.validation.pending && (
               <p className="rounded border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-200">
                 The file does not parse. Deployment will be rejected until the syntax error is fixed.
               </p>

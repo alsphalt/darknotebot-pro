@@ -8,6 +8,7 @@
  */
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { WebSocketServer } from 'ws';
 
 const now = () => new Date().toISOString();
 
@@ -18,6 +19,14 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
   const signed = new Map();
   const powers = [];
   const writes = [];
+  /** Every request the client made, so tests can prove the verb and the path. */
+  const calls = [];
+  /** Mirrors the real panel: the container state follows the last power signal. */
+  let containerState = 'running';
+  /** Lines Wings would relay to an authenticated console socket. */
+  const consoleHistory = ['DARKNOTE L2 starting', 'Loaded 12 plugins', 'Connected to WhatsApp'];
+  const consoleSockets = new Set();
+  let wsConnections = 0;
 
   const put = (path, text) => {
     if (!path.startsWith('/')) path = `/${path}`;
@@ -114,6 +123,8 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     });
   };
 
+  const wss = new WebSocketServer({ noServer: true });
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const send = (status, body, type = 'application/json') => {
@@ -121,6 +132,11 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
       res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
     };
     const unauthorized = () => send(401, { errors: [{ detail: 'Unauthenticated' }] });
+    // A real panel answers a wrong verb with 405 and never runs the action. The
+    // mock must do the same, otherwise a GET/PUT power call would look fine here
+    // and fail in production.
+    const methodNotAllowed = (allowed) =>
+      send(405, { errors: [{ code: 'MethodNotAllowedHttpException', detail: `Method ${req.method} is not allowed; use ${allowed.join(' or ')}.` }] });
     const notFound = () => send(404, { errors: [{ detail: 'Not found' }] });
     const noContent = () => send(204, '');
 
@@ -175,6 +191,29 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     if (serverId !== identifier) return notFound();
     const tail = `/${tailParts.join('/')}`.replace(/\/$/, '') || '';
 
+    calls.push({ method: req.method, path: url.pathname, search: url.search });
+
+    const filesOp = tail.startsWith('/files') ? tail.slice('/files'.length) : null;
+    const allowedMethods =
+      tail === ''
+        ? ['GET']
+        : tail === '/backups'
+          ? ['GET', 'POST']
+          : ['/resources', '/startup', '/activity', '/websocket'].includes(tail)
+            ? ['GET']
+            : ['/power', '/command'].includes(tail)
+              ? ['POST']
+              : filesOp === '/list' || filesOp === '/contents' || filesOp === '/download' || filesOp === '/upload'
+                ? ['GET']
+                : ['/write', '/delete', '/create-folder', '/copy', '/compress', '/decompress'].includes(filesOp)
+                  ? ['POST']
+                  : filesOp === '/rename' || filesOp === '/chmod'
+                    ? ['PUT']
+                    : null;
+    if (allowedMethods && !allowedMethods.includes(req.method)) {
+      return methodNotAllowed(allowedMethods);
+    }
+
     if (tail === '') {
       return send(200, {
         attributes: {
@@ -190,7 +229,7 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     }
     if (tail === '/resources') {
       return send(200, {
-        current_state: 'running',
+        current_state: containerState,
         is_suspended: false,
         resources: {
           memory_bytes: 268435456,
@@ -215,7 +254,10 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     if (tail === '/power') {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
-      powers.push(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      powers.push({ ...payload, method: req.method, path: url.pathname });
+      if (payload.signal === 'stop' || payload.signal === 'kill') containerState = 'offline';
+      else containerState = 'running';
       return noContent();
     }
     if (tail === '/command') return noContent();
@@ -284,6 +326,48 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     return notFound();
   });
 
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (!url.pathname.endsWith('/websocket')) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wsConnections += 1;
+      consoleSockets.add(ws);
+      ws.on('error', () => undefined);
+      ws.on('close', () => consoleSockets.delete(ws));
+      ws.on('message', (raw) => {
+        let message;
+        try {
+          message = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
+        if (message.event === 'auth') {
+          // Wings rejects a bad JWT with `jwt error` and closes the socket.
+          if (message.args?.[0] !== 'ws-token') {
+            ws.send(JSON.stringify({ event: 'jwt error', args: ['invalid token'] }));
+            ws.close();
+            return;
+          }
+          ws.send(JSON.stringify({ event: 'auth success', args: [null] }));
+          ws.send(JSON.stringify({ event: 'status', args: [containerState] }));
+          return;
+        }
+        if (message.event === 'send logs') {
+          for (const line of consoleHistory) {
+            ws.send(JSON.stringify({ event: 'console output', args: [line] }));
+          }
+          return;
+        }
+        if (message.event === 'send stats') {
+          ws.send(JSON.stringify({ event: 'status', args: [containerState] }));
+        }
+      });
+    });
+  });
+
   let port = 0;
   return {
     get baseUrl() {
@@ -297,6 +381,27 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     },
     powers,
     writes,
+    calls,
+    get containerState() {
+      return containerState;
+    },
+    get wsConnections() {
+      return wsConnections;
+    },
+    /** Push a line to every attached console, as the container's stdout would. */
+    emitConsole(line) {
+      consoleHistory.push(line);
+      for (const ws of consoleSockets) {
+        try {
+          ws.send(JSON.stringify({ event: 'console output', args: [line] }));
+        } catch {
+          /* socket already closed */
+        }
+      }
+    },
+    setContainerState(state) {
+      containerState = state;
+    },
     files,
     async start() {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -304,7 +409,20 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
       return this;
     },
     async stop() {
+      for (const ws of consoleSockets) {
+        try {
+          ws.close();
+        } catch {
+          /* already closed */
+        }
+      }
+      consoleSockets.clear();
+      await new Promise((resolve) => wss.close(() => resolve(undefined)));
       await new Promise((resolve) => server.close(resolve));
+    },
+    /** Signals received, with the verb and path that carried them. */
+    powersFor(signal) {
+      return powers.filter((entry) => entry.signal === signal);
     },
     /** Change a file behind the application's back, as an admin would in the panel. */
     externalEdit(path, text) {

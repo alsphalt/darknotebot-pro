@@ -16,17 +16,17 @@ files.
 
 | Section | Reality |
 |---|---|
-| **Overview / Live Monitor** | Live container state, CPU/RAM/disk, uptime, restart count, and a WhatsApp connection verdict inferred from real console lines |
+| **Overview / Live Monitor** | Live container state, CPU/RAM/disk, uptime and restart count from the panel; Start/Stop/Restart over `POST /power`; WhatsApp verdict from the bot process's own status file or its own connection events |
 | **Server Discovery** | Recursive walk of the actual filesystem → file index, SHA-256, AST-derived commands |
 | **File Manager** | Browse, create, rename, move, copy, delete, upload, ZIP import with path-traversal rejection, ZIP download |
-| **Code Editor** | Monaco, multi-tab, drafts stored separately from production, validate → diff → deploy |
+| **Code Editor** | Monaco, multi-tab, chunked load/save for multi-megabyte files, server-side drafts, validate → diff → deploy |
 | **Case Manager** | Every `switch` case parsed with an AST, edit/duplicate/delete with structural checks |
 | **Global Search** | Text, regex (ReDoS-guarded) and AST modes over indexed content, optional live re-verification |
 | **Synchronization** | Index reconciliation, hash-based conflict detection, both sides preserved |
 | **Deployments** | Backup → validate → atomic write → hash verify → restart → startup observation → rollback |
 | **Backups & Versions** | Private content-addressed store + panel backups |
 | **Download Center** | Serves freshly-read production bytes with a verified SHA-256 |
-| **Terminal & Logs** | Real console output over SSE, command sending gated behind confirmation |
+| **Terminal & Logs** | One persistent authenticated console websocket per server, relayed over SSE; command sending gated behind confirmation |
 | **Admin Settings** | Accounts, roles, capability probe, security posture |
 
 ---
@@ -38,6 +38,15 @@ files.
 - **A running container is not a connected WhatsApp session.** They are reported separately.
 - **Startup health is only claimed when console output was actually observed.** If the panel will
   not give us the websocket, the deployment succeeds but is marked *unverified*, not *healthy*.
+- **WhatsApp state has two sources.** If `DARKNOTE_BOT_STATUS_PATH` is configured and the bot writes
+  a JSON status file (for example `/data/status.json` with `{"whatsapp":"connected","startedAt":"..."}`),
+  that file is authoritative. Otherwise the state comes from this process's own console connection
+  events; generic log text cannot change it, and events from a previous process are discarded. If
+  neither is available the badge says *unknown* — it is never inferred from the container running.
+- **The console buffer lives in process memory.** Run a single instance (`next start`), or the monitor
+  and terminal will show different tails per replica.
+- **Pterodactyl has no ranged file read.** Opening a large file downloads it once to the control
+  center (cached for 90 s) and the browser then receives slices. The file itself is never truncated.
 - **`node --check` is a syntax check, not a runtime proof.** A deployment can still fail at runtime;
   that is what rollback and the console are for.
 
@@ -101,9 +110,27 @@ Run:
 
 ```bash
 npm run typecheck     # clean
-npm test              # 10/10
+npm test              # 21/21
 npm run build         # compiles
 ```
+
+`tests/monitor-editor.test.ts` drives the real services against a protocol-accurate panel double
+that **enforces HTTP verbs** (a wrong verb gets 405, exactly like Next.js and Pterodactyl) and serves
+a real Pterodactyl-style websocket:
+
+1. resources come from the panel, not from defaults (null, never 0, when absent)
+2. Start/Stop/Restart go out as `POST /api/client/servers/{id}/power` with `{"signal":"..."}` and
+   actually change the container state
+3. the console websocket authenticates, streams output, survives a reconnect, and the monitor shows
+   the same tail
+4. WhatsApp state follows this process's events, flips to disconnected on a drop, and resets when a
+   new process starts
+5. a 3 MB JavaScript file opens completely, reassembles byte-for-byte from chunks, saves with a
+   backup, and the pre-write version restores exactly
+6. the per-server editor limit is 16 MB by default and clamped by `DARKNOTE_MAX_EDITOR_BYTES`
+
+`tests/routes.test.ts` parses every route file and every client call site and fails when a component
+uses a verb the route does not export — the exact defect behind “Request failed (405)”.
 
 `tests/pipeline.test.ts` drives the real services against a Pterodactyl-shaped panel
 (`tests/mock-pterodactyl.mjs`) and asserts:
@@ -122,6 +149,35 @@ npm run build         # compiles
 **What this does not prove:** your panel's real permissions, quirks, rate limits or startup
 behaviour. Use *Admin Settings → Connection checks (deep)* against your server — it performs the
 real operations, including a scratch write that is read back and deleted.
+
+---
+
+## Large files
+
+The old build refused anything above 2 MB. That limit came from a 512 KB database default multiplied
+by four in the read layer; it is gone.
+
+| Setting | Meaning |
+|---|---|
+| `DARKNOTE_MAX_EDITOR_BYTES` | Process-wide ceiling for one text file (default 64 MB) |
+| `DARKNOTE_EDITOR_CHUNK_BYTES` | Slice size for chunked reads/writes (default 512 KB, 64 KB–8 MB) |
+| `DARKNOTE_MAX_DOWNLOAD_BYTES` | Ceiling for downloads, backups and uploads (default 96 MB) |
+| Settings → *Editor file limit (MB)* | Per-server limit, default 16 MB, clamped by the ceiling |
+| `DARKNOTE_MAX_SQL_CACHE_BYTES` | Files above this (default 1 MB) are not mirrored into SQL |
+
+How a large edit flows:
+
+1. `GET /api/files/content?mode=meta` — size, SHA-256 and limit, no body.
+2. `GET …&mode=chunk&offset=&length=` — ordered slices (UTF-16 units), progress bar in the UI.
+3. `POST /api/drafts/chunk` (create) → `PUT` each slice → `POST` (finalize). Finalize reassembles
+   once, checks every index is present, compares the byte count and verifies the browser's SHA-256.
+4. `POST /api/deployments` with `{ draftId }` — the browser never re-uploads the file. Deploy backs
+   up the current production file, writes atomically, re-reads and verifies SHA-256, restarts and
+   watches startup output.
+5. Older content stays restorable from Backups & Versions.
+
+If a file genuinely exceeds the limit, the API answers **413** with the actual size, the configured
+limit and the ceiling — it does not silently truncate.
 
 ---
 

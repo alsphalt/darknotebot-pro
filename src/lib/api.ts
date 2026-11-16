@@ -44,7 +44,14 @@ export function fail(error: unknown): NextResponse {
     return NextResponse.json({ ok: false, error: error.message, code: 'unsafe_path' }, { status: 400 });
   }
   if (error instanceof PterodactylError) {
-    const status = error.isAuthError ? 424 : error.isNotFound ? 404 : error.isRateLimited ? 429 : 502;
+    if (error.code === 'file_too_large') {
+      return NextResponse.json(
+        { ok: false, error: error.message, code: error.code, details: { endpoint: error.endpoint } },
+        { status: 413 },
+      );
+    }
+    const status =
+      error.isAuthError ? 424 : error.isNotFound ? 404 : error.isRateLimited ? 429 : error.status === 413 ? 413 : 502;
     return NextResponse.json(
       {
         ok: false,

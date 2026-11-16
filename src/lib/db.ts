@@ -14,7 +14,7 @@ export interface DbClient extends DbConnection {
   transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface Cache {
   client?: Promise<DbClient>;
@@ -138,6 +138,20 @@ async function migrate(client: DbClient): Promise<void> {
   // connection/instance the application will query, otherwise the tables land in
   // a different database.
   await client.exec(schemaSql());
+
+  // v2: the old schema defaulted every server to a 512 KB file limit, which the
+  // read layer doubled into the "2048 KB editor/backup limit" error. Raise that
+  // old default once; values an operator deliberately set are left alone.
+  if (!versions.has(2)) {
+    await client.query(
+      `alter table connected_servers alter column max_file_bytes set default 16777216`,
+    );
+    await client.query(`update connected_servers set max_file_bytes = 16777216 where max_file_bytes = 524288`);
+    await client.query(`alter table editor_drafts add column if not exists expected_bytes bigint`);
+    await client.query(`alter table editor_drafts add column if not exists expected_sha256 text`);
+    await client.query(`alter table editor_drafts add column if not exists chunk_count integer`);
+  }
+
   await client.query(`insert into schema_migrations (version) values ($1) on conflict do nothing`, [
     SCHEMA_VERSION,
   ]);

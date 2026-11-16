@@ -70,7 +70,7 @@ create table if not exists connected_servers (
   auto_restart          boolean not null default true,
   atomic_writes         boolean not null default true,
   startup_timeout_s     integer not null default 90,
-  max_file_bytes        integer not null default 524288,
+  max_file_bytes        integer not null default 16777216,
   sync_mode             text not null default 'polling',  -- polling | events
   sync_interval_s       integer not null default 300,
   is_active             boolean not null default true,
@@ -281,12 +281,27 @@ create table if not exists editor_drafts (
   user_id     text,
   content     text not null,
   base_sha256 text,
-  status      text not null default 'draft',   -- draft | deployed | discarded | conflict
+  status      text not null default 'draft',   -- uploading | draft | deployed | discarded | conflict
+  expected_bytes   bigint,
+  expected_sha256  text,
+  chunk_count      integer,
   note        text,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
 create unique index if not exists editor_drafts_key on editor_drafts (server_id, path, user_id);
+
+-- Large drafts are uploaded in ordered chunks and joined once when finalised, so
+-- a 20 MB file never has to be sent from (or held by) the browser in one request.
+create table if not exists editor_draft_chunks (
+  draft_id   text not null references editor_drafts(id) on delete cascade,
+  idx        integer not null,
+  content    text not null,
+  bytes      integer not null default 0,
+  created_at timestamptz not null default now(),
+  primary key (draft_id, idx)
+);
+create index if not exists editor_draft_chunks_draft_idx on editor_draft_chunks (draft_id, idx);
 
 create table if not exists sync_history (
   id            text primary key,

@@ -4,6 +4,8 @@ import type { ServerRecord } from './servers/repo';
 import { refreshStatus, consoleBuffer } from './services/console';
 import { currentLock, listDeployments } from './services/deploy';
 import { extensionOf } from './security/paths';
+import { editorLimitFor } from './files/service';
+import { env } from './env';
 
 /** Monaco language id for a remote filename. */
 export function languageFor(nameOrPath: string): string | null {
@@ -71,10 +73,13 @@ export function classifyLine(text: string): string {
 function lineViews(serverId: string): ConsoleLineView[] {
   const buffer = consoleBuffer(serverId);
   const now = Date.now();
-  return buffer.lines.map((text, index) => ({
-    ts: buffer.updatedAt ? buffer.updatedAt - (buffer.lines.length - index) * 120 : now,
-    text,
-    level: classifyLine(text),
+  const entries = buffer.entries.length
+    ? buffer.entries
+    : buffer.lines.map((text) => ({ ts: now, text }));
+  return entries.map((entry) => ({
+    ts: entry.ts || now,
+    text: entry.text,
+    level: classifyLine(entry.text),
   }));
 }
 
@@ -83,17 +88,31 @@ export type MonitorPayload = {
   checkedAt: string;
   panel: {
     reachable: boolean;
+    /** null, not 0, when the panel could not report a value. */
     state: string;
-    cpuPercent: number;
-    memoryBytes: number;
+    cpuPercent: number | null;
+    memoryBytes: number | null;
     memoryLimitBytes: number | null;
-    diskBytes: number;
+    diskBytes: number | null;
     diskLimitBytes: number | null;
-    uptimeMs: number;
+    uptimeMs: number | null;
     error: string | null;
   };
-  bot: { state: string; whatsapp: string; detail: string; evidence: string[] };
-  console: { streamState: string; streamError: string | null; lines: ConsoleLineView[] };
+  bot: {
+    state: string;
+    whatsapp: string;
+    whatsappSource: 'bot-process' | 'console-event' | 'none';
+    signal: string | null;
+    detail: string;
+    evidence: string[];
+  };
+  console: {
+    streamState: string;
+    streamError: string | null;
+    attached: boolean;
+    lines: ConsoleLineView[];
+  };
+  editor: { limitBytes: number; ceilingBytes: number; chunkBytes: number };
   index: {
     files: number;
     folders: number;
@@ -112,19 +131,14 @@ export type MonitorPayload = {
  * Container state and WhatsApp state are reported separately and never conflated:
  * a running container does not prove the WhatsApp session is connected.
  */
-export async function buildMonitor(
-  server: ServerRecord,
-  options: { captureConsole?: boolean; captureMs?: number } = {},
-): Promise<MonitorPayload> {
-  const lines = lineViews(server.id);
+export async function buildMonitor(server: ServerRecord): Promise<MonitorPayload> {
   let status: Awaited<ReturnType<typeof refreshStatus>> | null = null;
   let panelError: string | null = null;
 
+  // refreshStatus attaches the persistent console websocket, so every monitor
+  // poll also refreshes the live console tail.
   try {
-    status = await refreshStatus(server, {
-      captureConsole: options.captureConsole ?? false,
-      captureMs: options.captureMs,
-    });
+    status = await refreshStatus(server);
   } catch (error) {
     panelError = error instanceof Error ? error.message : String(error);
   }
@@ -165,15 +179,33 @@ export async function buildMonitor(
   }>;
   const restarts = deploymentList.filter((row) => row.restart_performed).length;
 
-  const consoleError = consoleBuffer(server.id).error;
-  const botState = status?.containerState ?? 'unknown';
+  const buffer = consoleBuffer(server.id);
+  const lines = lineViews(server.id);
+  const botState = status?.containerState ?? buffer.containerState ?? 'unknown';
   const whatsapp = status?.whatsappState ?? 'unknown';
-  const evidence = (status?.recentErrors ?? []).slice(-4);
+  const evidence = status?.whatsappEvidence ?? [];
+  const consoleState = status?.consoleState ?? buffer.state;
 
   const errors = lines
     .filter((line) => line.level === 'error')
     .slice(-20)
     .map((line) => ({ level: 'error', message: line.text, at: new Date(line.ts).toISOString(), source: 'console' }));
+  if (panelError) {
+    errors.push({ level: 'error', message: panelError, at: new Date().toISOString(), source: 'panel' });
+  }
+
+  const detail =
+    panelError
+      ? `The panel did not answer: ${panelError}`
+      : whatsapp === 'connected'
+        ? status?.whatsappSource === 'bot-process'
+          ? 'The bot process reported an open WhatsApp session.'
+          : 'The bot log reports an open WhatsApp session for this process.'
+        : whatsapp === 'unknown'
+          ? consoleState === 'live'
+            ? 'The console is attached, but no WhatsApp connection event has been printed yet.'
+            : 'The console is not attached yet, so WhatsApp state cannot be observed.'
+          : `The bot log reports the WhatsApp session as “${whatsapp}”.`;
 
   return {
     name: server.name,
@@ -181,29 +213,32 @@ export async function buildMonitor(
     panel: {
       reachable: !panelError,
       state: botState,
-      cpuPercent: status?.cpuPercent ?? 0,
-      memoryBytes: status?.memoryBytes ?? 0,
+      cpuPercent: status?.cpuPercent ?? null,
+      memoryBytes: status?.memoryBytes ?? null,
       memoryLimitBytes: status?.memoryLimitBytes ?? null,
-      diskBytes: status?.diskBytes ?? 0,
+      diskBytes: status?.diskBytes ?? null,
       diskLimitBytes: null,
-      uptimeMs: status?.uptimeMs ?? 0,
+      uptimeMs: status?.uptimeMs ?? null,
       error: panelError,
     },
     bot: {
       state: botState,
       whatsapp,
-      detail:
-        whatsapp === 'connected'
-          ? 'The panel container is running and the logs show an open WhatsApp session.'
-          : whatsapp === 'unknown'
-            ? 'Container state is known, but the logs do not contain a recognisable WhatsApp connection event yet. Attach the console to capture startup output.'
-            : `Logs report the WhatsApp session as "${whatsapp}".`,
+      whatsappSource: status?.whatsappSource ?? 'none',
+      signal: status?.whatsappSignal ?? null,
+      detail,
       evidence,
     },
     console: {
-      streamState: consoleError ? 'error' : lines.length ? 'live' : 'idle',
-      streamError: consoleError,
+      streamState: buffer.error && consoleState === 'error' ? 'error' : consoleState === 'live' ? 'live' : consoleState,
+      streamError: buffer.error,
+      attached: consoleState === 'live' || consoleState === 'connecting' || consoleState === 'reconnecting',
       lines: lines.slice(-400),
+    },
+    editor: {
+      limitBytes: editorLimitFor(server),
+      ceilingBytes: env.maxEditorBytes,
+      chunkBytes: env.editorChunkBytes,
     },
     index: {
       files: Number(indexCounts?.files ?? 0),

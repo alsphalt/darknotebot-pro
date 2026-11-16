@@ -105,6 +105,17 @@ export function normalizePanelUrl(raw: string): string {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) ? 1 : 0)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+/** Process-wide ceiling; mirrors env.maxEditorBytes without importing env here. */
+export function maxEditorCeiling(): number {
+  return Number(process.env.DARKNOTE_MAX_EDITOR_BYTES ?? 64 * 1024 * 1024);
+}
+
 export class PterodactylClient {
   private baseUrl: string;
   private apiKey: string;
@@ -119,6 +130,15 @@ export class PterodactylClient {
     this.serverId = conn.serverId;
     this.timeoutMs = conn.timeoutMs ?? 20_000;
     if (!this.apiKey) throw new PterodactylError('Pterodactyl API key is required');
+    // Application keys (ptla_) authenticate /api/application and are rejected by
+    // every /api/client route. Catching that here turns a confusing 401 into an
+    // actionable message.
+    if (/^ptla_/i.test(this.apiKey)) {
+      throw new PterodactylError(
+        'This is an Application API key (ptla_…). The control center talks to the Client API: create a key under Account → API Credentials in the panel (it starts with ptlc_).',
+        { status: 401, code: 'application_key_used' },
+      );
+    }
     if (!this.serverId) throw new PterodactylError('Pterodactyl server identifier is required');
   }
 
@@ -222,9 +242,17 @@ export class PterodactylClient {
   }
 
   // ---- account / panel -----------------------------------------------------
+  /**
+   * `GET /api/client` is the account's server list on a real panel, not panel
+   * metadata, so this deliberately tolerates several shapes. The authoritative
+   * connection proof is `getServer()` + `getResources()`, not this call.
+   */
   async getPanelInfo(): Promise<{ name?: string; version?: string; node?: string }> {
-    const res = await this.json<{ meta?: { version?: string }; name?: string }>('/');
-    return { name: res?.name ?? 'Pterodactyl', version: res?.meta?.version };
+    const res = await this.json<{ meta?: { version?: string }; name?: string; object?: string }>('/');
+    return {
+      name: res?.name ?? (res?.object === 'list' ? 'Pterodactyl' : 'Pterodactyl'),
+      version: res?.meta?.version,
+    };
   }
 
   async getAccount(): Promise<{ id: number; email: string; username: string; root_admin: boolean }> {
@@ -294,6 +322,15 @@ export class PterodactylClient {
     }));
   }
 
+  /** Ask the panel to build a whole-server backup. It completes asynchronously. */
+  async createBackup(name: string): Promise<{ uuid: string | null; name: string }> {
+    const res = await this.json<{ attributes?: { uuid?: string; name?: string } }>(this.serverPath('/backups'), {
+      method: 'POST',
+      body: JSON.stringify({ name: name.trim().slice(0, 100), ignored_files: [] }),
+    });
+    return { uuid: res?.attributes?.uuid ?? null, name: res?.attributes?.name ?? name };
+  }
+
   async backupDownloadUrl(uuid: string): Promise<string> {
     const res = await this.json<{ attributes: { url: string } }>(
       this.serverPath(`/backups/${encodeURIComponent(uuid)}/download`),
@@ -337,7 +374,12 @@ export class PterodactylClient {
     return (res.data ?? []).map((item) => item.attributes);
   }
 
-  async readFile(file: string, maxBytes = 8 * 1024 * 1024): Promise<string> {
+  /**
+   * Read a file's bytes. The panel route has no range support, so the whole file
+   * is transferred once; the caller is expected to cache it and slice chunks for
+   * the browser (see src/lib/files/read-cache.ts).
+   */
+  async readFile(file: string, maxBytes = 64 * 1024 * 1024): Promise<string> {
     const qs = new URLSearchParams({ file });
     const response = await this.raw(this.filesPath('/contents?' + qs), {
       headers: { Accept: 'text/plain, */*' },
@@ -346,8 +388,9 @@ export class PterodactylClient {
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.byteLength > maxBytes) {
       throw new PterodactylError(
-        `File is larger than the ${Math.round(maxBytes / 1024)} KB editor/backup limit`,
-        { endpoint: '/files/contents', code: 'file_too_large' },
+        `${file} is ${formatBytes(buffer.byteLength)} — larger than the ${formatBytes(maxBytes)} editor limit. ` +
+          `Raise “Editor file limit” for this server (maximum ${formatBytes(maxEditorCeiling())}) or edit it over SFTP.`,
+        { status: 413, endpoint: '/files/contents', code: 'file_too_large' },
       );
     }
     return buffer.toString('utf8');

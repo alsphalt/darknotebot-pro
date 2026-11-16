@@ -1,9 +1,11 @@
+import { z } from 'zod';
 import { route, ok, ApiError } from '@/lib/api';
 import { assertServerAccess, serverClient } from '@/lib/servers/repo';
 import { backupStorage } from '@/lib/backups/storage';
 import { query } from '@/lib/db';
 import { listDeployments } from '@/lib/services/deploy';
 import { publicId, toUiStatus } from '@/lib/deploy-view';
+import { logActivity } from '@/lib/audit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -123,5 +125,48 @@ export const GET = route({ permission: 'backup.manage' }, async ({ req, user }) 
     })),
     note:
       'Versions are stored in the control center\'s private backup store. Panel backups are listed from the panel itself and may be unavailable if the feature is disabled on the host.',
+  });
+});
+
+const backupSchema = z.object({
+  serverId: z.string().min(1),
+  action: z.literal('panel-backup'),
+  name: z.string().min(1).max(100).regex(/^[a-zA-Z0-9._-]+$/, 'Use letters, numbers, dots, dashes or underscores'),
+});
+
+/**
+ * Ask Pterodactyl to build a whole-server backup.
+ *
+ * The Backups page has always posted here; the route only exported GET, so this
+ * request was answered with 405 before it ever reached the panel.
+ */
+export const POST = route({ permission: 'backup.manage' }, async ({ user, body }) => {
+  const input = await body(backupSchema);
+  const server = await assertServerAccess(user, input.serverId, 'backup.manage');
+  const client = await serverClient(server);
+
+  let created: { uuid: string | null; name: string };
+  try {
+    created = await client.createBackup(input.name);
+  } catch (error) {
+    throw new ApiError(
+      `The panel did not start a backup: ${error instanceof Error ? error.message : String(error)}. ` +
+        'Whole-server backups must be enabled for this server on the host.',
+      502,
+      'panel_backup_failed',
+    );
+  }
+
+  await logActivity({
+    user,
+    serverId: server.id,
+    action: 'backup.panel_created',
+    target: created.name,
+    detail: { uuid: created.uuid },
+  });
+
+  return ok({
+    backup: created,
+    note: 'The panel builds this backup asynchronously. It appears in the list when it completes.',
   });
 });

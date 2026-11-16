@@ -12,6 +12,7 @@ import {
   Radar,
   RefreshCw,
   Rocket,
+  Square,
   TerminalSquare,
 } from "lucide-react";
 import { useServers, useToast } from "@/components/providers";
@@ -27,15 +28,22 @@ type Monitor = {
   panel: {
     reachable: boolean;
     state: string;
-    cpuPercent: number;
-    memoryBytes: number;
+    cpuPercent: number | null;
+    memoryBytes: number | null;
     memoryLimitBytes: number | null;
-    diskBytes: number;
+    diskBytes: number | null;
     diskLimitBytes: number | null;
-    uptimeMs: number;
+    uptimeMs: number | null;
     error: string | null;
   };
-  bot: { state: string; whatsapp: string; detail: string; evidence: string[] };
+  bot: {
+    state: string;
+    whatsapp: string;
+    whatsappSource: "bot-process" | "console-event" | "none";
+    signal: string | null;
+    detail: string;
+    evidence: string[];
+  };
   console: { streamState: string; lines: Array<{ ts: number; text: string; level: string }> };
   index: { files: number; folders: number; lastScanAt: string | null; lastScanStatus: string | null; lastScanMethod: string };
   sync: { lastSyncAt: string | null; pendingDrafts: number; openConflicts: number; changedFiles: number };
@@ -56,7 +64,7 @@ export default function OverviewPage() {
   const { activeServer, activeId, loading } = useServers();
   const { push } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
-  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [confirmPower, setConfirmPower] = useState<null | "restart" | "start" | "stop">(null);
 
   const monitor = useApi<Monitor>(activeId ? `/api/monitor?serverId=${activeId}` : null, { refreshMs: 20_000 });
   const deployments = useApi<{ deployments: DeploymentRow[] }>(
@@ -124,8 +132,14 @@ export default function OverviewPage() {
             >
               {busy === "sync" ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />} Sync now
             </button>
-            <button className="btn-primary" onClick={() => setConfirmRestart(true)} disabled={busy !== null}>
-              <Play className="h-3.5 w-3.5" /> Restart bot
+            <button className="btn-ghost" onClick={() => setConfirmPower("start")} disabled={busy !== null}>
+              <Play className="h-3.5 w-3.5" /> Start
+            </button>
+            <button className="btn-primary" onClick={() => setConfirmPower("restart")} disabled={busy !== null}>
+              <RefreshCw className="h-3.5 w-3.5" /> Restart bot
+            </button>
+            <button className="btn-danger" onClick={() => setConfirmPower("stop")} disabled={busy !== null}>
+              <Square className="h-3.5 w-3.5" /> Stop
             </button>
           </>
         }
@@ -142,13 +156,19 @@ export default function OverviewPage() {
           label="Bot container"
           value={<Status status={data?.bot.state ?? "UNKNOWN"} />}
           hint={data?.panel.state ? `panel state: ${data.panel.state}` : "waiting for panel"}
-          tone={data?.bot.state === "ONLINE" ? "good" : data?.bot.state === "CRASHED" ? "bad" : "warn"}
+          tone={data?.bot.state === "running" ? "good" : data?.panel.reachable ? "warn" : "bad"}
         />
         <Stat
           label="WhatsApp"
           value={<Status status={data?.bot.whatsapp ?? "UNKNOWN"} />}
-          hint={data?.bot.whatsapp === "UNKNOWN" ? "needs console output to confirm" : "from live console"}
-          tone={data?.bot.whatsapp === "CONNECTED" ? "good" : data?.bot.whatsapp === "DISCONNECTED" ? "bad" : "default"}
+          hint={
+            data?.bot.whatsappSource === "bot-process"
+              ? "reported by the bot process"
+              : data?.bot.whatsapp === "unknown"
+                ? "no connection event observed yet"
+                : "from this process's console"
+          }
+          tone={data?.bot.whatsapp === "connected" ? "good" : data?.bot.whatsapp === "disconnected" || data?.bot.whatsapp === "logged_out" ? "bad" : "default"}
         />
         <Stat
           label="Sync state"
@@ -189,10 +209,12 @@ export default function OverviewPage() {
         >
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-3">
-              <Meter label="CPU" value={data?.panel.cpuPercent ?? 0} max={100} />
+              <Meter label="CPU" value={data?.panel.cpuPercent ?? 0} max={data?.panel.cpuPercent === null ? null : 100} />
               <div className="flex items-baseline justify-between text-xs">
                 <span className="flex items-center gap-1.5 text-slate-500"><Cpu className="h-3 w-3" /> CPU</span>
-                <span className="text-slate-200">{data ? `${data.panel.cpuPercent.toFixed(1)}%` : "—"}</span>
+                <span className="text-slate-200">
+                  {data?.panel.cpuPercent !== null && data?.panel.cpuPercent !== undefined ? `${data.panel.cpuPercent.toFixed(1)}%` : "—"}
+                </span>
               </div>
               <Meter label="Memory" value={data?.panel.memoryBytes ?? 0} max={data?.panel.memoryLimitBytes ?? null} />
               <div className="flex items-baseline justify-between text-xs">
@@ -309,26 +331,37 @@ export default function OverviewPage() {
       </div>
 
       <ConfirmDialog
-        open={confirmRestart}
-        onClose={() => setConfirmRestart(false)}
+        open={confirmPower !== null}
+        onClose={() => setConfirmPower(null)}
         onConfirm={async () => {
-          setConfirmRestart(false);
+          const action = confirmPower;
+          setConfirmPower(null);
+          if (!action) return;
           await run(
-            "restart",
-            () => apiPost("/api/monitor", { serverId: activeId, action: "restart", confirm: "CONFIRM" }),
-            "Restart signal accepted by the panel",
+            action,
+            async () => {
+              const result = await apiPost<{ observedState: string | null }>("/api/monitor", {
+                serverId: activeId,
+                action,
+                confirm: "CONFIRM",
+              });
+              if (result.observedState) push(`Panel now reports ${result.observedState}`, "ok");
+            },
+            `${action} accepted by the panel`,
           );
         }}
-        title="Restart the bot?"
+        danger={confirmPower === "stop"}
+        busy={busy === confirmPower}
+        title={`${confirmPower ?? "Power"} the bot?`}
         description={
           <span>
-            The panel will receive a restart signal for <span className="mono">{activeServer.serverIdentifier}</span>.
-            WhatsApp reconnects with the existing session — no re-pairing required. Damage is possible if a file is
-            half-written, which is why deployments always verify hashes first.
+            The panel receives <span className="mono">POST /api/client/servers/{activeServer.serverIdentifier}/power</span> with{" "}
+            <span className="mono">{`{"signal":"${confirmPower ?? "restart"}"}`}</span>. WhatsApp reconnects with the existing
+            session — no re-pairing required.
           </span>
         }
-        confirmLabel="Restart now"
-        requireText="RESTART"
+        confirmLabel={confirmPower === "stop" ? "Stop now" : confirmPower === "start" ? "Start now" : "Restart now"}
+        requireText={confirmPower === "restart" ? "RESTART" : undefined}
       />
     </>
   );

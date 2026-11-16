@@ -4,7 +4,7 @@ import { uuid } from '../crypto';
 import { decryptSecret } from '../crypto';
 import { ApiError } from '../api';
 import type { Permission, Principal } from '../auth/permissions';
-import { createClient, normalizePanelUrl, PterodactylClient } from '../pterodactyl/client';
+import { createClient, maxEditorCeiling, normalizePanelUrl, PterodactylClient } from '../pterodactyl/client';
 import { DEFAULT_EXCLUDED_PATHS, isExcluded, normalizeRoot } from '../security/paths';
 
 export interface ServerRecord {
@@ -73,7 +73,7 @@ function map(row: Row): ServerRecord {
     autoRestart: row.auto_restart,
     atomicWrites: row.atomic_writes,
     startupTimeoutS: Number(row.startup_timeout_s ?? 90),
-    maxFileBytes: Number(row.max_file_bytes ?? 524288),
+    maxFileBytes: Number(row.max_file_bytes ?? 16777216),
     syncMode: row.sync_mode === 'events' ? 'events' : 'polling',
     syncIntervalS: Number(row.sync_interval_s ?? 300),
     isActive: row.is_active,
@@ -87,6 +87,14 @@ function map(row: Row): ServerRecord {
     lastError: row.last_error,
     apiKeyHint: row.api_key_hint,
   };
+}
+
+/** Editor limit is per server but can never exceed the process ceiling. */
+export function clampEditorLimit(bytes?: number): number {
+  const ceiling = maxEditorCeiling();
+  const fallback = Math.min(16 * 1024 * 1024, ceiling);
+  if (bytes === undefined || bytes === null || !Number.isFinite(bytes)) return fallback;
+  return Math.max(64 * 1024, Math.min(Math.round(bytes), ceiling));
 }
 
 export async function listServers(): Promise<ServerRecord[]> {
@@ -116,6 +124,7 @@ export interface CreateServerInput {
   autoRestart?: boolean;
   atomicWrites?: boolean;
   startupTimeoutS?: number;
+  maxFileBytes?: number;
   syncMode?: 'polling' | 'events';
   syncIntervalS?: number;
 }
@@ -128,9 +137,9 @@ export async function createServer(input: CreateServerInput, principal: Principa
   await query(
     `insert into connected_servers
       (id, name, panel_url, server_identifier, api_key_encrypted, api_key_hint, project_root,
-       allowed_extensions, excluded_paths, auto_restart, atomic_writes, startup_timeout_s, sync_mode,
-       sync_interval_s, created_by)
-     values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14,$15)`,
+        allowed_extensions, excluded_paths, auto_restart, atomic_writes, startup_timeout_s,
+        max_file_bytes, sync_mode, sync_interval_s, created_by)
+      values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14,$15,$16)`,
     [
       id,
       input.name.trim(),
@@ -144,6 +153,7 @@ export async function createServer(input: CreateServerInput, principal: Principa
       input.autoRestart ?? true,
       input.atomicWrites ?? true,
       input.startupTimeoutS ?? 90,
+      clampEditorLimit(input.maxFileBytes),
       input.syncMode === 'events' ? 'events' : 'polling',
       input.syncIntervalS ?? 300,
       principal.id,
@@ -183,6 +193,7 @@ export async function updateServer(
   if (patch.autoRestart !== undefined) push('auto_restart', patch.autoRestart);
   if (patch.atomicWrites !== undefined) push('atomic_writes', patch.atomicWrites);
   if (patch.startupTimeoutS !== undefined) push('startup_timeout_s', patch.startupTimeoutS);
+  if (patch.maxFileBytes !== undefined) push('max_file_bytes', clampEditorLimit(patch.maxFileBytes));
   if (patch.syncMode !== undefined) push('sync_mode', patch.syncMode);
   if (patch.syncIntervalS !== undefined) push('sync_interval_s', patch.syncIntervalS);
   if (patch.isActive !== undefined) push('is_active', patch.isActive);

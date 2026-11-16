@@ -2,6 +2,9 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // This repository can live inside another project that has its own lockfile.
+  // Pin the tracing root so Next writes and reads the same .next directory.
+  outputFileTracingRoot: __dirname,
   poweredByHeader: false,
   serverExternalPackages: ["ws", "pg", "@prisma/client", "@aws-sdk/client-s3", "@electric-sql/pglite"],
   async headers() {
