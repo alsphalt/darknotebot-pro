@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { useServers } from "./providers";
+import { InstallAppButton, OfflineNotice, PwaUpdateToast, usePwaInstall } from "./pwa";
 import { Status } from "./ui";
 import { apiPost } from "@/lib/client";
 
@@ -45,6 +46,18 @@ const NAV = [
   { href: "/console", label: "Terminal & Logs", icon: TerminalSquare },
   { href: "/settings", label: "Admin Settings", icon: Settings },
 ];
+
+/** Sidebar install entry. Renders nothing (and no separator) when the browser
+ *  cannot install the app, so the chrome stays clean on unsupported browsers. */
+function InstallRow() {
+  const { installState } = usePwaInstall();
+  if (installState !== "available" && installState !== "ios") return null;
+  return (
+    <div className="border-t border-ink-750/80 px-2 pb-1 pt-2">
+      <InstallAppButton variant="row" />
+    </div>
+  );
+}
 
 export function AppShell({
   user,
@@ -122,6 +135,7 @@ export function AppShell({
           )}
         </div>
         {nav}
+        <InstallRow />
         <div className="border-t border-ink-750/80 px-3 py-3">
           <div className="flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-ink-700 text-[11px] font-semibold text-slate-200">
@@ -150,6 +164,7 @@ export function AppShell({
               </button>
             </div>
             {nav}
+            <InstallRow />
             <div className="border-t border-ink-750 px-4 py-3 text-xs text-slate-400">
               <p className="font-medium text-slate-200">{user.name}</p>
               <p className="text-[10px] uppercase tracking-wider text-slate-500">{user.role}</p>
@@ -222,6 +237,8 @@ export function AppShell({
               </span>
             )}
 
+            <InstallAppButton variant="icon" className="hidden sm:inline-flex" />
+
             <Link href="/sync" className="btn-ghost !px-2 !py-1.5 text-[11px]">
               Sync
             </Link>
@@ -231,8 +248,12 @@ export function AppShell({
           </div>
         </header>
 
+        <OfflineNotice />
+
         <main className="mx-auto w-full max-w-[1500px] px-3 py-4 sm:px-6 sm:py-6">{children}</main>
       </div>
+
+      <PwaUpdateToast />
     </div>
   );
 }

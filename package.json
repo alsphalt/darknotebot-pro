@@ -12,6 +12,7 @@
     "db:check": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-check.ts",
     "create-admin": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/create-admin.ts",
     "monaco:copy": "node scripts/copy-monaco.mjs",
+    "icons": "node scripts/generate-icons.mjs",
     "postinstall": "node scripts/copy-monaco.mjs",
     "predev": "node scripts/copy-monaco.mjs",
     "prebuild": "node scripts/copy-monaco.mjs",

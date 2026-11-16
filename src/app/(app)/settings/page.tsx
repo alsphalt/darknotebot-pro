@@ -5,6 +5,7 @@ import { useState } from "react";
 import { KeyRound, Plug, Save, ShieldCheck, Trash2, UserPlus, Zap } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import { useServers, useToast } from "@/components/providers";
+import { InstallAppCard } from "@/components/pwa";
 import { Badge, ConfirmDialog, Empty, Panel, Spinner, Status } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost, errorMessage } from "@/lib/client";
 import { useApi } from "@/lib/use-api";
@@ -412,6 +413,10 @@ export default function SettingsPage() {
                 </li>
               ))}
             </ul>
+          </Panel>
+
+          <Panel title="Installable app" subtitle="Progressive Web App — home screen or dock, offline shell, own window">
+            <InstallAppCard />
           </Panel>
 
           <Panel title="Change my password" subtitle="Revokes every session, including this one">

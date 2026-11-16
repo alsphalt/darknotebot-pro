@@ -5,6 +5,32 @@ Last updated: 2026-11-16 · branch `main`
 
 ## This pass
 
+### Installable app — PWA (new)
+
+The console can now be installed as a standalone app. No dependency was added:
+
+- `public/manifest.webmanifest` — `standalone`, scope `/`, dark theme, 192/512 icons plus maskable
+  variants and three shortcuts.
+- `public/sw.js` — root-scoped worker. Static build output is stale-while-revalidate; **navigations
+  are network-first and never cached**, and `/api/*` is not intercepted at all, because this is an
+  authenticated admin surface. Failed navigations fall back to `/offline`, whose hashed chunks are
+  precached with it.
+- `src/components/pwa.tsx` — `PwaProvider` in the root layout, `beforeinstallprompt` capture, an
+  install row in the sidebar/drawer, a header icon button, a settings card, an iOS
+  *Share → Add to Home Screen* sheet, an offline strip and a "new version" reload toast driven by
+  `SKIP_WAITING`.
+- `src/app/offline/page.tsx` — static fallback outside the authenticated group.
+- `scripts/generate-icons.mjs` (`npm run icons`) — renders the icon set from signed distance fields,
+  so there are no binary image sources to maintain and every icon is generated at its exact size.
+- `next.config.ts` — `Service-Worker-Allowed: /`, `must-revalidate` for `sw.js`,
+  `application/manifest+json` for the manifest, immutable caching for `/icons/*`.
+
+Verified locally: `npm run typecheck`, `npm test` (70 tests, including 7 new PWA contract tests) and
+`npm run build` (route table shows `/offline` as static). The dev server answers `/sw.js`,
+`/manifest.webmanifest`, `/icons/icon-192.png` and `/offline` with the expected status codes and
+headers, and `/login` carries `<link rel="manifest">` plus the Apple web-app meta tags. The browser
+install prompt itself was not exercised here — no browser was available in this environment.
+
 ### Code editor — blank surface (fixed)
 
 The tab header rendered (path, 391 KB, SHA) while the editor area stayed empty. Three
