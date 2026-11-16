@@ -8,6 +8,7 @@ import { apiGet, apiPost, errorMessage } from "@/lib/client";
 type SessionInfo = {
   user: { id: string; name: string; email: string; role: string } | null;
   needsBootstrap: boolean;
+  setupTokenConfigured?: boolean;
   env: { ok: boolean; missing: string[]; backupDriver: string };
 };
 
@@ -123,6 +124,13 @@ export default function LoginPage() {
             <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
               Server is missing environment variables: <span className="mono">{info.env.missing.join(", ")}</span>.
               Set them before signing in — see SETUP.md.
+            </div>
+          )}
+
+          {mode === "bootstrap" && info && info.setupTokenConfigured === false && (
+            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+              This deployment has no <span className="mono">SETUP_TOKEN</span> configured, so first-run setup is
+              closed. Set it in the environment (or run <span className="mono">npm run create-admin</span>) and reload.
             </div>
           )}
 
