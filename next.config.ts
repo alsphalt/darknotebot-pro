@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  serverExternalPackages: ["ws", "pg", "@electric-sql/pglite", "@prisma/client", "@aws-sdk/client-s3"],
+  serverExternalPackages: ["ws", "pg", "@prisma/client", "@aws-sdk/client-s3", "@electric-sql/pglite"],
   async headers() {
     return [
       {

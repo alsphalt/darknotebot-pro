@@ -26,6 +26,12 @@ export const env = {
   adminPassword: process.env.DARKNOTE_ADMIN_PASSWORD ?? '',
   adminName: process.env.DARKNOTE_ADMIN_NAME ?? 'Administrator',
 
+  /**
+   * Shared secret that gates the browser first-run setup form. Accepts the
+   * documented name and the bare SETUP_TOKEN spelling the setup screen refers to.
+   */
+  setupToken: process.env.DARKNOTE_SETUP_TOKEN ?? process.env.SETUP_TOKEN ?? '',
+
   /** Used for session token hashing + AES-256-GCM credential encryption. */
   secret: process.env.DARKNOTE_SECRET ?? '',
 
