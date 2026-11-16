@@ -3,11 +3,15 @@ import path from 'node:path';
 import { env, ensureDataDirs } from './env';
 
 export type SqlParam = string | number | boolean | null | string[] | number[];
-export interface DbClient {
-  readonly kind: 'neon' | 'pglite';
+export interface DbConnection {
   query<T = Record<string, unknown>>(sql: string, params?: SqlParam[]): Promise<{ rows: T[] }>;
   /** Run a multi-statement script. Used only for schema application. */
   exec(sql: string): Promise<void>;
+}
+
+export interface DbClient extends DbConnection {
+  readonly kind: 'neon' | 'pglite';
+  transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
 }
 
 const SCHEMA_VERSION = 1;
@@ -51,6 +55,33 @@ async function createNeon(): Promise<DbClient> {
     async exec(sql: string) {
       await pool.query(sql);
     },
+    async transaction<T>(fn: (connection: DbConnection) => Promise<T>) {
+      const connection = await pool.connect();
+      const transactionClient: DbConnection = {
+        async query<T>(sql: string, params?: SqlParam[]) {
+          const result = await connection.query(sql, params as unknown[]);
+          return { rows: result.rows as T[] };
+        },
+        async exec(sql: string) {
+          await connection.query(sql);
+        },
+      };
+      try {
+        await connection.query('begin');
+        const result = await fn(transactionClient);
+        await connection.query('commit');
+        return result;
+      } catch (error) {
+        try {
+          await connection.query('rollback');
+        } catch {
+          /* ignore rollback failure */
+        }
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
   };
   return client;
 }
@@ -67,6 +98,30 @@ async function createPglite(): Promise<DbClient> {
     },
     async exec(sql: string) {
       await pg.exec(sql);
+    },
+    async transaction<T>(fn: (connection: DbConnection) => Promise<T>) {
+      const transactionClient: DbConnection = {
+        async query<T>(sql: string, params?: SqlParam[]) {
+          const result = await pg.query(sql, params as unknown[]);
+          return { rows: result.rows as T[] };
+        },
+        async exec(sql: string) {
+          await pg.exec(sql);
+        },
+      };
+      await pg.query('begin');
+      try {
+        const result = await fn(transactionClient);
+        await pg.query('commit');
+        return result;
+      } catch (error) {
+        try {
+          await pg.query('rollback');
+        } catch {
+          /* ignore rollback failure */
+        }
+        throw error;
+      }
     },
   };
   return client;
@@ -137,21 +192,9 @@ export function parseJsonb<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
-export async function withTransaction<T>(fn: (client: DbClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T> {
   const client = await db();
-  await client.query('begin');
-  try {
-    const result = await fn(client);
-    await client.query('commit');
-    return result;
-  } catch (error) {
-    try {
-      await client.query('rollback');
-    } catch {
-      /* ignore rollback failure */
-    }
-    throw error;
-  }
+  return client.transaction(fn);
 }
 
 export function dbKind(): 'neon' | 'pglite' | 'unknown' {
