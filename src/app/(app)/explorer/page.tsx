@@ -77,6 +77,7 @@ export default function ExplorerPage() {
   const [categoryView, setCategoryView] = useState<ExplorerCategoryView | null>(null);
   const [categoryLoading, setCategoryLoading] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [paging, setPaging] = useState(false);
 
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState<ExplorerSearchResult | null>(null);
@@ -128,7 +129,7 @@ export default function ExplorerPage() {
       setSearchResult(null);
       setCategoryLoading(true);
       try {
-        const data = await apiGet<ExplorerCategoryView>(`/api/explorer/category?serverId=${activeId}&id=${id}&limit=300`);
+        const data = await apiGet<ExplorerCategoryView>(`/api/explorer/category?serverId=${activeId}&id=${id}&limit=200&offset=0`);
         setCategoryView(data);
       } catch (err) {
         push(errorMessage(err), "error");
@@ -139,6 +140,26 @@ export default function ExplorerPage() {
     },
     [activeId, push],
   );
+
+  /** Append the next page instead of replacing the list. */
+  const loadMore = useCallback(async () => {
+    if (!activeId || !category || !categoryView) return;
+    setPaging(true);
+    try {
+      const data = await apiGet<ExplorerCategoryView>(
+        `/api/explorer/category?serverId=${activeId}&id=${category}&limit=200&offset=${categoryView.items.length}`,
+      );
+      setCategoryView((previous) =>
+        previous
+          ? { ...data, items: [...previous.items, ...data.items] }
+          : data,
+      );
+    } catch (err) {
+      push(errorMessage(err), "error");
+    } finally {
+      setPaging(false);
+    }
+  }, [activeId, category, categoryView, push]);
 
   useEffect(() => {
     if (!activeId || query.trim().length < 2) {
@@ -493,7 +514,9 @@ export default function ExplorerPage() {
                   <>
                     <p className="mb-2 text-[10px] text-slate-500">
                       {categoryView.total} result{categoryView.total === 1 ? "" : "s"}
-                      {categoryView.truncated ? ` (showing first ${categoryView.items.length})` : ""}
+                      {categoryView.items.length < categoryView.total
+                        ? ` · showing ${categoryView.items.length}`
+                        : ""}
                     </p>
                     <div className="divide-y divide-ink-750/60">
                       {categoryView.items.map((item) => (
@@ -510,6 +533,18 @@ export default function ExplorerPage() {
                         />
                       ))}
                     </div>
+                    {categoryView.items.length < categoryView.total && (
+                      <button
+                        className="btn-ghost mt-3 w-full !py-2 text-[11px]"
+                        onClick={() => void loadMore()}
+                        disabled={paging}
+                      >
+                        {paging ? <Spinner /> : <ChevronRight className="h-3.5 w-3.5" />} Load more
+                        <span className="text-slate-500">
+                          ({categoryView.total - categoryView.items.length} left)
+                        </span>
+                      </button>
+                    )}
                   </>
                 )}
                 {categoryView?.notes.filter(Boolean).length ? (

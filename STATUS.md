@@ -49,14 +49,25 @@ data records cannot be edited or deleted.
   plus the resolved `package.json`.
 - Unit tests: 2 new cases for the deletion rules and `resolvePackageMainPath`.
 
+### Pagination + freshness
+
+- `GET /api/explorer/category` takes `offset` and returns the real `total`, so a long
+  list pages instead of truncating at a fixed cap; the page appends the next 200.
+- The overview warns `index_stale` when a file was written after the last index update
+  (upload/deploy), pointing at a rescan.
+- Dependency freshness is opt-in (`DARKNOTE_NPM_REGISTRY_CHECK=1`): latest published
+  versions are compared with the declared ranges, bounded to 40 packages, 4 concurrent,
+  4 s timeout, 30 min cache. Off = unknown, never a guess.
+- Global search reports how many indexed files were skipped (binary/oversize/secret).
+
 ### Verified in this pass
 
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | clean |
-| `npm test` | 57/57 (`pipeline`, `monitor-editor`, `editor`, `explorer`, `routes`) |
+| `npm test` | 63/63 (`pipeline`, `monitor-editor`, `editor`, `explorer`, `routes`) |
 | `npm run build` | passes (Next 15 production build) |
-| `node tests/e2e-live.mjs` | **31/31** against `next start` + a 405-enforcing panel double (9 of them explorer checks) |
+| `node tests/e2e-live.mjs` | **34/34** against `next start` + a 405-enforcing panel double (13 of them explorer checks) |
 | BIGBRO.js 391 KB | opened through `mode=full`, body length = `totalChars`, SHA-256 matches, draft saved, reload restored production, deploy kept every byte, original restored |
 | Explorer discovery | a deliberately different layout (`/plugins`, `/commands`, `/config`, `/database`, `/data`) resolves all seven categories, `menu` plugin grouped with 2 files, cases from 3 files with lines, entry = `/index.js` from `node index.js` |
 | Explorer safety | `/database/owner.json` delete → 403 `protected_data`; delete without confirmation → 400; `.env` never read; `.env.example` shows key names only |

@@ -20,6 +20,7 @@ export const GET = route({ permission: 'file.read' }, async ({ req, user }) => {
   const view = await explorerCategory(server, id, {
     q: url.searchParams.get('q') ?? undefined,
     limit: Number(url.searchParams.get('limit') ?? 200),
+    offset: Number(url.searchParams.get('offset') ?? 0),
   });
   return ok(view);
 });

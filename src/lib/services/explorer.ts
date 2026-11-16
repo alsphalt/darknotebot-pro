@@ -495,7 +495,21 @@ export async function explorerOverview(server: ServerRecord): Promise<ExplorerOv
     }
   });
 
+  const freshness = await queryOne<{ last_written: string | null; last_indexed: string | null }>(
+    `select
+       (select max(created_at) from file_versions where server_id = $1) as last_written,
+       (select max(indexed_at) from file_indexes where server_id = $1) as last_indexed`,
+    [server.id],
+  );
+
   const warnings: ExplorerWarning[] = [];
+  if (freshness?.last_written && freshness?.last_indexed && freshness.last_written > freshness.last_indexed) {
+    warnings.push({
+      code: 'index_stale',
+      message:
+        'A file was written after the last index update (upload or deploy). Rescan to make the explorer match production again.',
+    });
+  }
   if (!files.length) {
     warnings.push({
       code: 'index_empty',
@@ -685,11 +699,19 @@ function pluginGroups(files: IndexRow[]): PluginGroup[] {
 export async function explorerCategory(
   server: ServerRecord,
   id: ExplorerCategoryId,
-  options: { q?: string; limit?: number } = {},
+  options: { q?: string; limit?: number; offset?: number } = {},
 ): Promise<ExplorerCategoryView> {
   const definition = EXPLORER_CATEGORIES.find((category) => category.id === id);
   if (!definition) throw new Error(`Unknown category ${id}`);
-  const limit = Math.min(Math.max(options.limit ?? 200, 10), 1000);
+  const limit = Math.min(Math.max(Math.floor(options.limit ?? 200), 1), 1000);
+  const offset = Math.max(0, Math.floor(options.offset ?? 0));
+  /** Slice one page and keep the real total so the UI can page without re-counting. */
+  const page = (all: ExplorerItem[]) => ({
+    items: all.slice(offset, offset + limit),
+    total: all.length,
+    truncated: offset + limit < all.length,
+    offset,
+  });
   const search = (options.q ?? '').trim().toLowerCase();
   const index = await loadIndex(server);
   const files = index.filter((row) => !row.is_directory);
@@ -728,10 +750,8 @@ export async function explorerCategory(
     for (const problem of view.problems) notes.push(problem.message);
     return {
       ...definition,
-      items: items.slice(0, limit),
+      ...page(items),
       notes: notes.filter(Boolean),
-      total: items.length,
-      truncated: items.length > limit,
     };
   }
 
@@ -760,7 +780,7 @@ export async function explorerCategory(
     if (view.startupCommand) notes.push(`Panel startup: ${view.startupCommand}`);
     if (view.note) notes.push(view.note);
     if (startup.error) notes.push(`Startup command unavailable: ${startup.error}`);
-    return { ...definition, items, notes, total: items.length, truncated: false };
+    return { ...definition, ...page(items), notes };
   }
 
   if (id === 'plugins') {
@@ -820,7 +840,7 @@ export async function explorerCategory(
     if (!groups.length) {
       notes.push('No plugin-shaped directory exists in the index. Files required by the entry point still appear under Cases and Functions.');
     }
-    return { ...definition, items: items.slice(0, limit), notes, total: items.length, truncated: items.length > limit };
+    return { ...definition, ...page(items), notes };
   }
 
   if (id === 'cases') {
@@ -856,7 +876,7 @@ export async function explorerCategory(
     }
     notes.push('Cases come from an AST walk of every parsed JavaScript file, so a case in any directory is found — not only the ones in a known commands folder.');
     if (!rows.length) notes.push('No case was parsed. Run a scan; files that fail to parse are listed as unparsed instead of being silently skipped.');
-    return { ...definition, items: items.slice(0, limit), notes, total: items.length, truncated: items.length > limit };
+    return { ...definition, ...page(items), notes };
   }
 
   if (id === 'functions') {
@@ -875,7 +895,7 @@ export async function explorerCategory(
       children: list.slice(0, 40).map((row) => ({ path, name: row.name, line: row.line_start, detail: row.signature ?? undefined })),
     }));
     notes.push('Functions and helpers are listed per file with their exact line, including arrow constants and class methods.');
-    return { ...definition, items: items.slice(0, limit), notes, total: items.length, truncated: items.length > limit };
+    return { ...definition, ...page(items), notes };
   }
 
   if (id === 'config') {
@@ -921,7 +941,7 @@ export async function explorerCategory(
       });
     }
     notes.push('Only file names and key names are shown. Values of credential files are never read by the explorer, and .env files are excluded entirely.');
-    return { ...definition, items, notes, total: items.length, truncated: items.length > limit };
+    return { ...definition, ...page(items), notes };
   }
 
   // database
@@ -957,7 +977,7 @@ export async function explorerCategory(
       } satisfies ExplorerItem;
     });
   notes.push('Schema, model and connection files are source and can be edited. Database files and JSON/CSV records inside data folders are marked protected and cannot be edited or deleted here.');
-  return { ...definition, items, notes, total: items.length, truncated: items.length > limit };
+  return { ...definition, ...page(items), notes };
 }
 
 // ---------------------------------------------------------------------------

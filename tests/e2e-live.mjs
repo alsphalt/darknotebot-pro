@@ -298,6 +298,12 @@ try {
   );
   ok(`cases category found ${caseView.total} file(s) of commands with exact lines`);
 
+  const paged = await call('GET', `/api/explorer/category?serverId=${serverId}&id=cases&limit=1&offset=1`);
+  assert.equal(paged.items.length, 1);
+  assert.equal(paged.offset, 1);
+  assert.ok(paged.total >= 2, `cases total: ${paged.total}`);
+  ok(`category pagination returns one page at a time (${paged.total} total)`);
+
   const entryView = await call('GET', `/api/explorer/category?serverId=${serverId}&id=entry`);
   assert.ok(entryView.items.some((item) => item.path === '/index.js' && item.badges.includes('entry point')));
 

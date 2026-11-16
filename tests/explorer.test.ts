@@ -453,6 +453,20 @@ test('global search finds a command, a function and a code snippet by location',
   assert.ok(byName.names.some((entry) => entry.path === '/commands/ping.js'));
 });
 
+test('category lists page without losing the real total', async () => {
+  const first = await explorerCategory(server!, 'cases', { limit: 1, offset: 0 });
+  const second = await explorerCategory(server!, 'cases', { limit: 1, offset: 1 });
+  assert.ok(first.total >= 2, `expected several case files, got ${first.total}`);
+  assert.equal(first.items.length, 1);
+  assert.equal(first.offset, 0);
+  assert.equal(first.truncated, true);
+  assert.equal(second.offset, 1);
+  assert.notEqual(first.items[0].id, second.items[0].id, 'the second page must not repeat the first');
+  const all = await explorerCategory(server!, 'cases', { limit: 200, offset: 0 });
+  assert.equal(all.items.length, all.total);
+  assert.equal(all.truncated, false);
+});
+
 test('a rescan detects added, deleted and renamed files', async () => {
   panel.externalEdit('/plugins/menu/extra.js', "module.exports = { extra: true };\n");
   // Same bytes, new name: this is the rename case.

@@ -32,6 +32,8 @@ export interface ExplorerCategoryView {
   notes: string[];
   total: number;
   truncated: boolean;
+  /** Items skipped by this page. */
+  offset: number;
 }
 
 export interface ExplorerCategorySummary {
