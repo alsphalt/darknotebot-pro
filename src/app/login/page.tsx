@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Check, KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
 import { ApiError, apiGet, apiPost, errorMessage } from "@/lib/client";
+import { PASSWORD_MIN_LENGTH, isPasswordValid, passwordChecklist } from "@/lib/auth/password-policy";
 
 type SessionInfo = {
   user: { id: string; name: string; email: string; role: string } | null;
@@ -37,8 +38,12 @@ export default function LoginPage() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setBusy(true);
     setError(null);
+    if (mode === "bootstrap" && !isPasswordValid(password)) {
+      setError("Choose a password that meets all of the requirements listed under the password field.");
+      return;
+    }
+    setBusy(true);
     try {
       if (mode === "login") {
         await apiPost("/api/auth/login", { email, password });
@@ -182,11 +187,34 @@ export default function LoginPage() {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 required
-                minLength={mode === "bootstrap" ? 12 : 8}
+                minLength={mode === "bootstrap" ? PASSWORD_MIN_LENGTH : 8}
                 autoComplete={mode === "bootstrap" ? "new-password" : "current-password"}
+                aria-describedby={mode === "bootstrap" ? "password-policy" : undefined}
+                aria-invalid={mode === "bootstrap" && password.length > 0 && !isPasswordValid(password)}
               />
               {mode === "bootstrap" && (
-                <p className="mt-1 text-[11px] text-slate-600">Minimum 12 characters.</p>
+                <ul id="password-policy" className="mt-2 space-y-1">
+                  {passwordChecklist(password).map((rule) => (
+                    <li
+                      key={rule.hint}
+                      className={`flex items-start gap-1.5 text-[11px] leading-relaxed ${
+                        rule.met ? "text-emerald-400" : "text-slate-500"
+                      }`}
+                    >
+                      <span className="mt-[1px] flex h-3 w-3 shrink-0 items-center justify-center">
+                        {rule.met ? (
+                          <Check className="h-3 w-3" aria-hidden="true" />
+                        ) : (
+                          <span className="h-1 w-1 rounded-full bg-slate-600" aria-hidden="true" />
+                        )}
+                      </span>
+                      <span>
+                        {rule.hint}
+                        <span className="sr-only">{rule.met ? " — requirement met" : " — requirement not met yet"}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
 
@@ -213,7 +241,11 @@ export default function LoginPage() {
             </p>
           )}
 
-          <button type="submit" className="btn-primary mt-5 w-full" disabled={busy}>
+          <button
+            type="submit"
+            className="btn-primary mt-5 w-full"
+            disabled={busy || (mode === "bootstrap" && !isPasswordValid(password))}
+          >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
             {mode === "login" ? "Sign in" : "Create owner account"}
           </button>

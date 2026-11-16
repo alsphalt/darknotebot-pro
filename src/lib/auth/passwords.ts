@@ -1,5 +1,9 @@
 import bcrypt from 'bcryptjs';
 
+// The policy lives in a pure module so the login form can enforce the exact same
+// rules client-side. Re-exported here to keep existing server-side imports working.
+export { PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH, passwordProblems } from './password-policy';
+
 const ROUNDS = 12;
 
 export async function hashPassword(password: string): Promise<string> {
@@ -12,14 +16,4 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   } catch {
     return false;
   }
-}
-
-export function passwordProblems(password: string): string[] {
-  const problems: string[] = [];
-  if (password.length < 12) problems.push('Must be at least 12 characters long');
-  if (!/[A-Z]/.test(password)) problems.push('Must include an uppercase letter');
-  if (!/[a-z]/.test(password)) problems.push('Must include a lowercase letter');
-  if (!/[0-9]/.test(password)) problems.push('Must include a number');
-  if (!/[^A-Za-z0-9]/.test(password)) problems.push('Must include a symbol');
-  return problems;
 }
