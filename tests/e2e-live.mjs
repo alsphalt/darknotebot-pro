@@ -59,7 +59,12 @@ function largeSource(bytes) {
 }
 
 const dataDir = mkdtempSync(path.join(os.tmpdir(), 'darknote-e2e-'));
-const panel = await createMockPanel({ identifier: 'abc12345', seed: { '/huge.js': largeSource(3 * 1024 * 1024) } }).start();
+// The panel API key must satisfy the app's own validation (min 20 chars).
+const panel = await createMockPanel({
+  identifier: 'abc12345',
+  apiKey: 'ptlc_e2e_client_key_that_is_long_enough',
+  seed: { '/huge.js': largeSource(3 * 1024 * 1024) },
+}).start();
 
 let nextProcess = null;
 const jar = new Map();
@@ -100,7 +105,8 @@ async function call(method, pathname, body) {
   if (!response.ok || payload?.ok === false) {
     // A 405 here is the exact failure the browser used to show, so name it.
     const hint = response.status === 405 ? ' (HTTP 405 — the request used a verb this route/panel does not implement)' : '';
-    throw new Error(`${method} ${pathname} → ${response.status}${hint}: ${payload?.error ?? payload?.raw ?? text}`);
+    const detail = payload?.details ? ` — ${JSON.stringify(payload.details)}` : '';
+    throw new Error(`${method} ${pathname} → ${response.status}${hint}: ${payload?.error ?? payload?.raw ?? text}${detail}`);
   }
   return payload?.data ?? payload;
 }
@@ -291,10 +297,12 @@ try {
   ok('deployed the draft, hash re-read from production matches, bot restart issued');
 
   // ---- version + rollback ------------------------------------------------
-  const versions = await call('GET', `/api/versions?serverId=${serverId}&path=${encodeURIComponent('/huge.js')}&limit=10`);
-  const list = versions.versions ?? versions;
-  const previous = (Array.isArray(list) ? list : []).find((version) => version.sha256 === meta.sha256);
-  assert.ok(previous, 'the pre-deploy version must be listed');
+  // Versions are listed by the Backups page through /api/backups.
+  const backupView = await call('GET', `/api/backups?serverId=${serverId}`);
+  const previous = (backupView.versions ?? []).find(
+    (version) => version.sha256 === meta.sha256 && version.path === '/huge.js',
+  );
+  assert.ok(previous, 'the pre-deploy version must be listed in Backups & Versions');
 
   const compared = await call('GET', `/api/versions?serverId=${serverId}&id=${previous.id}`);
   assert.equal(compared.version.sha256, meta.sha256);
