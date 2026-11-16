@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ApiError, ok, publicRoute, rateLimit } from '@/lib/api';
-import { hashPassword, passwordProblems } from '@/lib/auth/passwords';
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, hashPassword, passwordProblems } from '@/lib/auth/passwords';
 import { env } from '@/lib/env';
 import { jsonb, withTransaction } from '@/lib/db';
 import { safeEqual, uuid } from '@/lib/crypto';
@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 const schema = z.object({
   email: z.string().trim().email().max(200),
   name: z.string().trim().min(2).max(120),
-  password: z.string().min(12).max(200),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   setupToken: z.string().min(1).max(200),
 });
 

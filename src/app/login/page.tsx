@@ -2,9 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Check, Eye, EyeOff, KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
 import { ApiError, apiGet, apiPost, errorMessage } from "@/lib/client";
-import { PASSWORD_MIN_LENGTH, isPasswordValid, passwordChecklist } from "@/lib/auth/password-policy";
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  isPasswordValid,
+  passwordChecklist,
+  passwordProblems,
+} from "@/lib/auth/password-policy";
 
 type SessionInfo = {
   user: { id: string; name: string; email: string; role: string } | null;
@@ -23,6 +29,7 @@ export default function LoginPage() {
   const [setupToken, setSetupToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     apiGet<SessionInfo>("/api/auth/session")
@@ -39,9 +46,13 @@ export default function LoginPage() {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
-    if (mode === "bootstrap" && !isPasswordValid(password)) {
-      setError("Choose a password that meets all of the requirements listed under the password field.");
-      return;
+    if (mode === "bootstrap") {
+      const problems = passwordProblems(password);
+      if (problems.length > 0) {
+        setError(`Password is not ready yet — ${problems.join("; ")}.`);
+        document.getElementById("password")?.focus();
+        return;
+      }
     }
     setBusy(true);
     try {
@@ -177,44 +188,81 @@ export default function LoginPage() {
             </div>
 
             <div>
-              <label className="label" htmlFor="password">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                className="field mt-1"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                minLength={mode === "bootstrap" ? PASSWORD_MIN_LENGTH : 8}
-                autoComplete={mode === "bootstrap" ? "new-password" : "current-password"}
-                aria-describedby={mode === "bootstrap" ? "password-policy" : undefined}
-                aria-invalid={mode === "bootstrap" && password.length > 0 && !isPasswordValid(password)}
-              />
+              <div className="flex items-baseline justify-between gap-2">
+                <label className="label" htmlFor="password">
+                  Password
+                </label>
+                {mode === "bootstrap" && (
+                  <span className="text-[10px] tabular-nums text-slate-600">
+                    {Math.min(password.length, PASSWORD_MAX_LENGTH)}/{PASSWORD_MAX_LENGTH}
+                  </span>
+                )}
+              </div>
+              <div className="relative mt-1">
+                <input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  className="field pr-11"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  minLength={mode === "bootstrap" ? PASSWORD_MIN_LENGTH : 8}
+                  maxLength={PASSWORD_MAX_LENGTH}
+                  autoComplete={mode === "bootstrap" ? "new-password" : "current-password"}
+                  aria-describedby={mode === "bootstrap" ? "password-policy" : undefined}
+                  aria-invalid={mode === "bootstrap" && password.length > 0 && !isPasswordValid(password)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((visible) => !visible)}
+                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-slate-500 transition hover:text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  aria-controls="password"
+                  title={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
               {mode === "bootstrap" && (
-                <ul id="password-policy" className="mt-2 space-y-1">
-                  {passwordChecklist(password).map((rule) => (
-                    <li
-                      key={rule.hint}
-                      className={`flex items-start gap-1.5 text-[11px] leading-relaxed ${
-                        rule.met ? "text-emerald-400" : "text-slate-500"
-                      }`}
-                    >
-                      <span className="mt-[1px] flex h-3 w-3 shrink-0 items-center justify-center">
-                        {rule.met ? (
-                          <Check className="h-3 w-3" aria-hidden="true" />
-                        ) : (
-                          <span className="h-1 w-1 rounded-full bg-slate-600" aria-hidden="true" />
-                        )}
-                      </span>
-                      <span>
-                        {rule.hint}
-                        <span className="sr-only">{rule.met ? " — requirement met" : " — requirement not met yet"}</span>
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <div className="mt-2">
+                  <p id="password-policy-title" className="text-[11px] font-medium text-slate-400">
+                    Password requirements
+                  </p>
+                  <ul
+                    id="password-policy"
+                    aria-labelledby="password-policy-title"
+                    aria-live="polite"
+                    className="mt-1 space-y-1"
+                  >
+                    {passwordChecklist(password).map((rule) => (
+                      <li
+                        key={rule.hint}
+                        className={`flex items-start gap-1.5 text-[11px] leading-relaxed ${
+                          rule.met ? "text-emerald-400" : "text-slate-500"
+                        }`}
+                      >
+                        <span className="mt-[1px] flex h-3 w-3 shrink-0 items-center justify-center">
+                          {rule.met ? (
+                            <Check className="h-3 w-3" aria-hidden="true" />
+                          ) : (
+                            <span className="h-1 w-1 rounded-full bg-slate-600" aria-hidden="true" />
+                          )}
+                        </span>
+                        <span>
+                          {rule.hint}
+                          <span className="sr-only">
+                            {rule.met ? " — requirement met" : " — requirement not met yet"}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
 
