@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
-import { apiGet, apiPost, errorMessage } from "@/lib/client";
+import { ApiError, apiGet, apiPost, errorMessage } from "@/lib/client";
 
 type SessionInfo = {
   user: { id: string; name: string; email: string; role: string } | null;
@@ -30,7 +30,9 @@ export default function LoginPage() {
         if (data.user) router.replace("/");
         if (data.needsBootstrap) setMode("bootstrap");
       })
-      .catch((err) => setError(errorMessage(err)));
+      .catch((err) => {
+        if (!(err instanceof ApiError) || err.status !== 401) setError(errorMessage(err));
+      });
   }, [router]);
 
   const submit = async (event: React.FormEvent) => {
@@ -42,6 +44,7 @@ export default function LoginPage() {
         await apiPost("/api/auth/login", { email, password });
       } else {
         await apiPost("/api/auth/bootstrap", { email, name, password, setupToken });
+        await apiPost("/api/auth/login", { email, password });
       }
       router.replace("/");
       router.refresh();
