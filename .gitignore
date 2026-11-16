@@ -31,3 +31,5 @@ Thumbs.db
 # test artifacts
 coverage/
 .tmp/
+# generated at install/build time from node_modules/monaco-editor
+public/monaco/

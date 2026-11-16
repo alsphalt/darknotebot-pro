@@ -58,12 +58,40 @@ function largeSource(bytes) {
   return lines.join('\n');
 }
 
+function bigBroSource(bytes) {
+  const lines = [
+    '#!/usr/bin/env node',
+    "'use strict';",
+    '// DARKNOTE command module — the file the editor must show in full.',
+    'const handlers = new Map();',
+  ];
+  let length = lines.join('\n').length;
+  let index = 0;
+  while (length < bytes) {
+    const line = `handlers.set('cmd_${index}', async (conn, m) => { await m.reply('reply ${index}'); });`;
+    lines.push(line);
+    length += line.length + 1;
+    index += 1;
+  }
+  lines.push('module.exports = { handlers };', '');
+  return lines.join('\n');
+}
+
+const BIGBRO = bigBroSource(391 * 1024);
+
 const dataDir = mkdtempSync(path.join(os.tmpdir(), 'darknote-e2e-'));
 // The panel API key must satisfy the app's own validation (min 20 chars).
 const panel = await createMockPanel({
   identifier: 'abc12345',
   apiKey: 'ptlc_e2e_client_key_that_is_long_enough',
-  seed: { '/huge.js': largeSource(3 * 1024 * 1024) },
+  seed: {
+    '/huge.js': largeSource(3 * 1024 * 1024),
+    // The file the editor was reported to open as a 391 KB blank surface.
+    '/BIGBRO.js': bigBroSource(391 * 1024),
+    '/README.md': '# DARKNOTE L2\n\nA WhatsApp bot.\n\n## Commands\n- .menu\n- .ping\n',
+    '/styles.css': ':root { --accent: #6d5efc; }\nbody { background: #05060a; color: #e7eaf3; }\n',
+    '/notes.txt': 'plain text notes\nsecond line\n',
+  },
 }).start();
 
 let nextProcess = null;
@@ -109,6 +137,17 @@ async function call(method, pathname, body) {
     throw new Error(`${method} ${pathname} → ${response.status}${hint}: ${payload?.error ?? payload?.raw ?? text}${detail}`);
   }
   return payload?.data ?? payload;
+}
+
+async function rawGet(pathname) {
+  const headers = { Accept: '*/*' };
+  if (jar.size) headers.Cookie = cookieHeader();
+  const response = await fetch(`${BASE}${pathname}`, { headers });
+  return {
+    status: response.status,
+    type: response.headers.get('content-type') ?? '',
+    text: await response.text(),
+  };
 }
 
 async function waitForServer() {
@@ -222,6 +261,161 @@ try {
   assert.equal(monitor.bot.whatsapp, 'connected');
   assert.equal(monitor.bot.whatsappSource, 'console-event');
   ok(`live monitor: container running, CPU ${monitor.panel.cpuPercent}%, RAM ${monitor.panel.memoryBytes} B, console attached`);
+
+  // ---- the editor's real path (small file, whole body) -------------------
+  const bigroMeta = await call(
+    'GET',
+    `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}&mode=meta`,
+  );
+  assert.equal(bigroMeta.content, null, 'meta mode must not ship the body');
+  assert.equal(bigroMeta.language, 'javascript');
+  assert.equal(bigroMeta.sizeBytes, Buffer.byteLength(BIGBRO, 'utf8'));
+  assert.equal(bigroMeta.totalChars, BIGBRO.length);
+  ok(
+    `BIGBRO.js metadata: ${(bigroMeta.sizeBytes / 1024).toFixed(0)} KB, ${bigroMeta.totalChars.toLocaleString()} chars, limit ${(bigroMeta.limitBytes / 1024 / 1024).toFixed(0)} MB`,
+  );
+
+  // This is the request the editor makes for any file below 1 MB. It used to be
+  // the one that produced an empty editor, so assert the body, not just the hash.
+  const bigroFull = await call(
+    'GET',
+    `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}&mode=full`,
+  );
+  assert.equal(typeof bigroFull.content, 'string', 'the body must be a string, not null/undefined');
+  assert.equal(bigroFull.content.length, bigroFull.totalChars, 'no characters may be dropped');
+  assert.equal(sha256(bigroFull.content), bigroFull.sha256, 'the body must hash to the reported SHA-256');
+  assert.equal(bigroFull.content, BIGBRO, 'the body must be the production file itself');
+  assert.ok(bigroFull.content.startsWith('#!/usr/bin/env node'));
+  assert.ok(bigroFull.content.trimEnd().endsWith('module.exports = { handlers };'));
+  assert.equal(bigroFull.validation.ok, true, 'the real source must parse');
+  ok('BIGBRO.js opened through mode=full with the complete source and a matching SHA-256');
+
+  // ---- draft, reload, deploy for that file --------------------------------
+  // A real, parseable edit: appending a trailing comment keeps every original byte.
+  const bigroEdit = `${BIGBRO}// edited from the control center\n`;
+  await call('PUT', '/api/drafts', {
+    serverId,
+    path: '/BIGBRO.js',
+    content: bigroEdit,
+    baseSha: bigroFull.sha256,
+  });
+  const withDraft = await call(
+    'GET',
+    `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}&mode=meta`,
+  );
+  assert.ok(withDraft.draft, 'the saved draft must be attached to the file');
+  assert.equal(withDraft.draft.content, bigroEdit, 'the draft must hold the edited bytes');
+
+  const afterDraft = await call(
+    'GET',
+    `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}&mode=full&fresh=1`,
+  );
+  assert.equal(afterDraft.content, BIGBRO, 'saving a draft must not touch production');
+  assert.equal(afterDraft.draft.content, bigroEdit, 'reopening must return both versions');
+  ok('draft saved without touching production; reopening returns the production body plus the draft');
+
+  // Reload = re-read production, discarding the draft.
+  await call('DELETE', `/api/drafts?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}`);
+  const reloaded = await call(
+    'GET',
+    `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/BIGBRO.js')}&mode=full&fresh=1`,
+  );
+  assert.equal(reloaded.content, BIGBRO, 'reload must restore the exact production contents');
+  assert.equal(reloaded.draft, null);
+  ok('reload restored the exact production contents and cleared the draft');
+
+  const bigroDeploy = await call('POST', '/api/deployments', {
+    serverId,
+    files: [{ path: '/BIGBRO.js', content: bigroEdit, expectedSha: reloaded.sha256 }],
+    message: 'e2e editor deploy',
+  });
+  assert.equal(bigroDeploy.deployment.status, 'SUCCEEDED', `deploy failed: ${bigroDeploy.deployment.error}`);
+  assert.equal(bigroDeploy.deployment.files[0].postHash, sha256(bigroEdit));
+  assert.equal(panel.read('/BIGBRO.js'), bigroEdit, 'production must hold the complete edited file');
+  assert.ok(panel.read('/BIGBRO.js').length > 390 * 1024, 'the deploy must not truncate the file');
+  ok('deployed the edited BIGBRO.js, verified the re-read hash and kept all 391 KB');
+
+  const restoredBigBro = await call('POST', '/api/deployments', {
+    serverId,
+    files: [{ path: '/BIGBRO.js', content: BIGBRO, expectedSha: sha256(bigroEdit) }],
+    message: 'e2e restore original',
+  });
+  assert.equal(
+    restoredBigBro.deployment.status,
+    'SUCCEEDED',
+    `restore failed: ${restoredBigBro.deployment.error}`,
+  );
+  assert.equal(panel.read('/BIGBRO.js'), BIGBRO, 'the original must be restorable');
+  ok('restored the original BIGBRO.js byte-for-byte');
+
+  // A blank editor must never be able to erase production, even if the UI guard
+  // is bypassed: the write path itself has to refuse it.
+  let emptyBlocked = false;
+  try {
+    await call('POST', '/api/deployments', {
+      serverId,
+      files: [{ path: '/BIGBRO.js', content: '', expectedSha: sha256(BIGBRO) }],
+      message: 'e2e empty write must fail',
+    });
+  } catch (error) {
+    emptyBlocked = /422|empty_write_blocked|empty buffer/i.test(String(error.message));
+  }
+  assert.equal(emptyBlocked, true, 'an empty deployment must be refused with empty_write_blocked');
+  assert.equal(panel.read('/BIGBRO.js'), BIGBRO, 'the refused deploy must leave production untouched');
+  ok('empty deployment refused server-side; production still holds all 391 KB');
+
+  // ---- what the browser actually loads ------------------------------------
+  const editorPage = await rawGet(`/editor?path=${encodeURIComponent('/BIGBRO.js')}`);
+  assert.equal(editorPage.status, 200, 'the editor page must render');
+  assert.match(editorPage.type, /text\/html/);
+
+  const monacoLoader = await rawGet('/monaco/vs/loader.js');
+  assert.equal(monacoLoader.status, 200, 'Monaco must be served from this origin, not a CDN');
+  assert.match(monacoLoader.type, /javascript/);
+  assert.match(monacoLoader.text, /loadPlugin|define/, 'that must be the Monaco AMD loader');
+
+  const monacoMain = await rawGet('/monaco/vs/editor/editor.main.js');
+  assert.equal(monacoMain.status, 200);
+  assert.ok(monacoMain.text.length > 1_000_000, 'the editor bundle must be complete');
+
+  const monacoCss = await rawGet('/monaco/vs/editor/editor.main.css');
+  assert.equal(monacoCss.status, 200);
+  assert.match(monacoCss.text, /\.monaco-editor/, 'editor styles must resolve (no unstyled surface)');
+  ok('editor page and self-hosted Monaco assets (loader, bundle, stylesheet) all served');
+
+  // ---- every file type the editor claims to support ----------------------
+  const otherFiles = [
+    { path: '/index.js', language: 'javascript' },
+    { path: '/lib/msg.js', language: 'javascript' },
+    { path: '/package.json', language: 'json' },
+    { path: '/config.json', language: 'json' },
+    { path: '/README.md', language: 'markdown' },
+    { path: '/styles.css', language: 'css' },
+    { path: '/notes.txt', language: 'plaintext' },
+  ];
+  for (const file of otherFiles) {
+    const opened = await call(
+      'GET',
+      `/api/files/content?serverId=${serverId}&path=${encodeURIComponent(file.path)}&mode=full`,
+    );
+    assert.equal(opened.language, file.language, `${file.path} must map to ${file.language}`);
+    assert.equal(typeof opened.content, 'string');
+    assert.ok(opened.content.length > 0, `${file.path} must not open as an empty surface`);
+    assert.equal(opened.content, panel.read(file.path), `${file.path} must be the production body`);
+    assert.equal(sha256(opened.content), opened.sha256);
+    assert.equal(opened.validation.ok, true, `${file.path} must parse`);
+  }
+  ok(`opened ${otherFiles.length} other file types (js, json, md, css, txt) with real content and no parse errors`);
+
+  // Protected paths stay protected: the editor must refuse, not show an empty tab.
+  let blocked = false;
+  try {
+    await call('GET', `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/.env')}&mode=full`);
+  } catch (error) {
+    blocked = /403|secret/i.test(String(error.message));
+  }
+  assert.equal(blocked, true, 'a credential path must be refused, never opened blank');
+  ok('credential paths are refused');
 
   // ---- large file read ---------------------------------------------------
   const meta = await call('GET', `/api/files/content?serverId=${serverId}&path=${encodeURIComponent('/huge.js')}&mode=meta`);

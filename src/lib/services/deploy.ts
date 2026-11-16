@@ -417,6 +417,7 @@ async function rollbackFiles(
         note: `Rollback of deployment ${deploymentId}`,
         userId: user.id,
         deploymentId: null,
+        allowEmpty: true,
       });
       result.status = 'rolled_back';
     } catch (error) {
@@ -479,6 +480,7 @@ export async function rollbackDeployment(options: {
         expectedHash: null,
         note: `Manual rollback of deployment ${deploymentId}`,
         userId: user.id,
+        allowEmpty: true,
       });
       restored.push(version.path);
     } catch (error) {

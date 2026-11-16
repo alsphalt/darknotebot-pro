@@ -1,6 +1,5 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -19,18 +18,16 @@ import {
   Scissors,
   TextSelect,
   Trash2,
+  WrapText,
   X,
 } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
+import { CodeEditor } from "@/components/code-editor";
 import { useServers, useToast } from "@/components/providers";
 import { Badge, ConfirmDialog, Empty, Modal, Panel, Spinner, Status } from "@/components/ui";
 import { apiDelete, apiGet, apiPost, apiPut, download, errorMessage } from "@/lib/client";
+import { checkLoadedContent, checkWrite } from "@/lib/editor/guards";
 import { relative } from "@/lib/format";
-
-const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
-  ssr: false,
-  loading: () => <div className="flex h-full items-center justify-center text-xs text-slate-500"><Spinner className="mr-2" /> Loading editor…</div>,
-});
 
 type Tab = {
   path: string;
@@ -83,7 +80,6 @@ type FilePayload = {
 
 /** Above this size the editor switches to the chunked reader/writer path. */
 const LARGE_FILE_BYTES = 1_024 * 1_024;
-const LARGE_FILE_BYTES_FOR_MONACO = 2 * 1_024 * 1_024;
 
 function formatSize(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
@@ -237,6 +233,7 @@ function EditorView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [wrap, setWrap] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployNote, setDeployNote] = useState("");
@@ -283,6 +280,19 @@ function EditorView() {
           content = full.content ?? "";
           validation = full.validation ?? { ok: true, errors: [] };
         }
+
+        /**
+         * Prove the buffer before it becomes a tab. An empty string used to be
+         * indistinguishable from "the editor is broken" and could be saved over a
+         * real file, so a short or empty body is now a hard error.
+         */
+        const loaded = checkLoadedContent({
+          path: meta.path,
+          content,
+          totalChars: meta.totalChars,
+          sizeBytes: meta.sizeBytes,
+        });
+        if (!loaded.ok) throw new Error(loaded.reason);
 
         const tab: Tab = {
           path: meta.path,
@@ -392,6 +402,12 @@ function EditorView() {
     if (!current || !activeId) return;
     setSaving(true);
     try {
+      // Never persist an empty buffer over a file that has bytes on production.
+      const guard = checkWrite({ productionBytes: current.sizeBytes, content: current.content });
+      if (!guard.ok) {
+        push(guard.reason, "error");
+        return;
+      }
       const bytes = utf8Length(current.content);
       if (current.limitBytes && bytes > current.limitBytes) {
         throw new Error(
@@ -433,6 +449,13 @@ function EditorView() {
     if (!current || !activeId) return;
     setDeploying(true);
     try {
+      // Same rule as the draft: an empty editor must never reach production.
+      const guard = checkWrite({ productionBytes: current.sizeBytes, content: current.content });
+      if (!guard.ok) {
+        push(guard.reason, "error");
+        setDeployOpen(false);
+        return;
+      }
       const bytes = utf8Length(current.content);
       // A large file is never posted as one body: it is stored as a server-side
       // draft first and the deployment then references that draft by id.
@@ -593,6 +616,13 @@ function EditorView() {
         description="Edits are drafts until deployed. A deploy backs up the current production file, writes, verifies the hash and restarts the bot."
         actions={
           <>
+            <button
+              className={`btn-ghost ${wrap ? "border-accent/50 text-accent-soft" : ""}`}
+              onClick={() => setWrap((value) => !value)}
+              title="Toggle soft line wrapping (off keeps horizontal scrolling)"
+            >
+              <WrapText className="h-3.5 w-3.5" /> Wrap {wrap ? "on" : "off"}
+            </button>
             <button className="btn-ghost" onClick={() => setFullscreen((value) => !value)}>
               <Expand className="h-3.5 w-3.5" /> {fullscreen ? "Exit fullscreen" : "Fullscreen"}
             </button>
@@ -706,18 +736,21 @@ function EditorView() {
 
       <div className={`grid gap-3 ${fullscreen ? "min-h-0 flex-1 grid-rows-[1fr]" : "lg:grid-cols-[1fr_290px]"}`}>
         <Panel
-          bodyClassName="!p-0"
-          className="min-h-[55dvh] overflow-hidden"
+          bodyClassName="!flex !flex-1 !min-h-0 !flex-col !p-0"
+          className={`overflow-hidden ${fullscreen ? "flex min-h-0 flex-col" : ""}`}
         >
           {current ? (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-750/70 px-3 py-2">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-ink-750/70 px-3 py-2">
                 <div className="min-w-0">
                   <p className="mono truncate text-[11px] text-slate-300">{current.path}</p>
                   <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
                     <span>sha {current.sha?.slice(0, 10) ?? "—"}</span>
                     <span>·</span>
                     <span>{formatSize(current.sizeBytes)}</span>
+                    <span>·</span>
+                    {/* Proof that the buffer in the editor is the file, not an empty surface. */}
+                    <span title="Characters currently held by the editor">{current.content.length.toLocaleString()} chars</span>
                     {current.limitBytes ? (
                       <>
                         <span>·</span>
@@ -754,47 +787,36 @@ function EditorView() {
                 </div>
               </div>
 
-              <div className="h-[calc(100%-52px)] min-h-[45dvh]">
-                <MonacoEditor
-                  height="100%"
+              {current.content.length === 0 && (current.sizeBytes ?? 0) === 0 && (
+                <div className="shrink-0 border-b border-ink-750/70 bg-ink-900/60 px-3 py-1.5 text-[10px] text-slate-400">
+                  This file is empty on production (0 B). Typing here is the only way it gets content.
+                </div>
+              )}
+
+              {/**
+               * The surface is measured in pixels by CodeEditor, so it always has a
+               * real height on phones, tablets and desktop. The old wrapper relied on
+               * `calc(100% - 52px)` inside an auto-height parent, which collapsed to
+               * 0 px and produced a blank editor.
+               */}
+              <div
+                className={
+                  fullscreen
+                    ? "relative min-h-0 w-full flex-1"
+                    : "relative w-full h-[64dvh] min-h-[340px] lg:h-[calc(100dvh_-_19rem)] lg:min-h-[440px]"
+                }
+              >
+                <CodeEditor
                   path={current.path}
                   language={current.language}
                   value={current.content}
-                  theme="vs-dark"
-                  onChange={(value) => update(value ?? "")}
+                  large={current.large}
+                  wrap={wrap}
+                  onChange={update}
                   onMount={(editor, monaco) => {
                     editorRef.current = editor;
                     monacoRef.current = monaco;
                     if (lineParam > 0) setTimeout(() => revealLine(lineParam), 200);
-                  }}
-                  options={{
-                    // Chunked loading keeps memory bounded, but a very large model
-                    // still needs the trimmed feature set to stay responsive on
-                    // phones and low-end laptops.
-                    largeFileOptimizations: true,
-                    occurrencesHighlight: current.large ? "off" : "singleFile",
-                    minimap: { enabled: !current.large && typeof window !== "undefined" && window.innerWidth > 1100 },
-                    fontSize: typeof window !== "undefined" && window.innerWidth < 640 ? 12 : 13,
-                    fontFamily: "var(--font-mono)",
-                    wordWrap: !current.large && typeof window !== "undefined" && window.innerWidth < 640 ? "on" : "off",
-                    lineNumbers: "on",
-                    folding: !current.large,
-                    autoIndent: "full",
-                    bracketPairColorization: { enabled: !current.large },
-                    matchBrackets: current.large ? "never" : "always",
-                    automaticLayout: true,
-                    tabSize: 2,
-                    scrollBeyondLastLine: false,
-                    smoothScrolling: true,
-                    padding: { top: 10, bottom: 24 },
-                    quickSuggestions: !current.large,
-                    suggestOnTriggerCharacters: !current.large,
-                    wordBasedSuggestions: current.large ? "off" : "currentDocument",
-                    codeLens: false,
-                    renderWhitespace: "selection",
-                    maxTokenizationLineLength: current.large ? 2000 : 20000,
-                    renderLineHighlight: current.large ? "none" : "line",
-                    stickyScroll: { enabled: false },
                   }}
                 />
               </div>

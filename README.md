@@ -152,6 +152,22 @@ real operations, including a scratch write that is read back and deleted.
 
 ---
 
+## Code editor runtime
+
+The editor has to show the production bytes, so three things are deliberate:
+
+| Concern | Implementation |
+|---|---|
+| Component binding | `@monaco-editor/react` is imported as `mod.Editor`, not as the module namespace. A dynamic import of the namespace object is not a React component and renders no surface at all while the rest of the page works. |
+| Monaco hosting | Served from this origin at `/monaco/vs`. `scripts/copy-monaco.mjs` copies `node_modules/monaco-editor/min/vs` into `public/monaco` on `postinstall`, `predev` and `prebuild` (git-ignored, ~14 MB). `src/lib/editor/monaco.ts` probes that path first and only falls back to the jsDelivr CDN if the local copy is missing; if neither answers it switches to the plain-text surface instead of showing an empty box. |
+| Editor height | Measured with a `ResizeObserver` and passed to Monaco as an explicit pixel height. Percentage heights inside an auto-height panel collapse to `0 px`, which renders a working editor with no visible area. |
+| Content proof | `GET /api/files/content?mode=full` returns the body plus `sha256`/`totalChars`; the page refuses to open a tab whose buffer length differs from `totalChars` or is empty while production reports bytes. The header prints the live character count so the buffer is visible as a number, not just as pixels. |
+
+Safety before any write: an empty (or whitespace-only) buffer cannot be saved or
+deployed over a file that has bytes on production, the panel response is checked
+for a 200-with-empty-body, non-UTF-8 files are refused rather than decoded lossily,
+and a deploy still re-reads production and compares SHA-256 before the restart.
+
 ## Large files
 
 The old build refused anything above 2 MB. That limit came from a 512 KB database default multiplied

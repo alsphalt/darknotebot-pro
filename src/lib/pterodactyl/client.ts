@@ -393,7 +393,17 @@ export class PterodactylClient {
         { status: 413, endpoint: '/files/contents', code: 'file_too_large' },
       );
     }
-    return buffer.toString('utf8');
+    // Decoding must be lossless: `buffer.toString('utf8')` silently rewrites
+    // invalid sequences to U+FFFD, which would then be saved back over the file as
+    // corruption. `ignoreBOM: true` keeps a BOM so a round-trip stays byte-exact.
+    try {
+      return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
+    } catch {
+      throw new PterodactylError(
+        `${file} is not valid UTF-8 text (binary or a legacy encoding). It cannot be edited as code without corrupting it — download it or use SFTP.`,
+        { status: 415, endpoint: '/files/contents', code: 'not_utf8_text' },
+      );
+    }
   }
 
   async writeFile(file: string, content: string): Promise<void> {
