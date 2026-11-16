@@ -486,7 +486,9 @@ export interface DependencyView {
   kind: 'dependency' | 'devDependency';
   imported: boolean;
   installed: 'present' | 'missing' | 'unverified';
-  status: 'ok' | 'missing' | 'unused' | 'unpinned';
+  /** Latest published version, only when the registry check is enabled. */
+  latest: string | null;
+  status: 'ok' | 'missing' | 'unused' | 'unpinned' | 'outdated';
 }
 
 /**
@@ -501,6 +503,8 @@ export function analyseDependencies(input: {
   devDependencies: Record<string, string>;
   imported: string[];
   installedModules: string[] | null;
+  /** name → latest published version; omitted when the registry check is off. */
+  latest?: Record<string, string> | null;
 }): { entries: DependencyView[]; problems: PackageProblem[]; undeclared: string[] } {
   const imported = new Set(input.imported);
   const installed = input.installedModules ? new Set(input.installedModules) : null;
@@ -523,9 +527,27 @@ export function analyseDependencies(input: {
           : 'missing'
         : 'unverified';
       const unpinned = !range || range === '*' || range === 'latest';
+      const latest = input.latest?.[name] ?? null;
+      const outdated = latest ? isOutdatedVersion(range || '', latest) === true : false;
       const status: DependencyView['status'] =
-        presence === 'missing' ? 'missing' : !isImported ? 'unused' : unpinned ? 'unpinned' : 'ok';
-      entries.push({ name, range: range || '(none)', kind, imported: isImported, installed: presence, status });
+        presence === 'missing'
+          ? 'missing'
+          : !isImported
+            ? 'unused'
+            : outdated
+              ? 'outdated'
+              : unpinned
+                ? 'unpinned'
+                : 'ok';
+      entries.push({
+        name,
+        range: range || '(none)',
+        kind,
+        imported: isImported,
+        installed: presence,
+        latest,
+        status,
+      });
     }
   }
 
@@ -544,6 +566,12 @@ export function analyseDependencies(input: {
     });
   }
   for (const entry of entries) {
+    if (entry.status === 'outdated' && entry.latest) {
+      problems.push({
+        code: 'outdated_dependency',
+        message: `${entry.name} is declared as ${entry.range} but ${entry.latest} is published — a fresh install would still pin the old range.`,
+      });
+    }
     if (entry.status === 'missing') {
       problems.push({
         code: 'missing_dependency',
@@ -629,3 +657,107 @@ export function resolvePackageMainPath(packageJsonPath: string | null | undefine
   const combined = `${dir}/${main}`.replace(/\/{2,}/g, '/');
   return combined.startsWith('/') ? combined : `/${combined}`;
 }
+
+interface Bound {
+  operator: '^' | '~' | '>=' | '>' | '=';
+  major: number;
+  minor: number | null;
+  patch: number | null;
+}
+
+export function registryCheckEnabled(): boolean {
+  return process.env.DARKNOTE_NPM_REGISTRY_CHECK === '1';
+}
+
+function parseVersion(value: string): [number, number, number] | null {
+  const match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$/.exec(value.trim());
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+}
+
+function parseBound(raw: string): Bound | null {
+  const text = raw.trim();
+  if (!text || text === '*' || text === 'latest' || text === 'x' || text === 'X') return null;
+  const match = /^(\^|~|>=|>|=)?\s*v?(\d+)(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(?:[-+].*)?$/.exec(text);
+  if (!match) return null;
+  const [, operator = '=', major, minorRaw, patchRaw] = match;
+  const minor = minorRaw && !/[xX*]/.test(minorRaw) ? Number(minorRaw) : null;
+  const patch = patchRaw && !/[xX*]/.test(patchRaw) ? Number(patchRaw) : null;
+  return {
+    operator: (operator || '=') as Bound['operator'],
+    major: Number(major),
+    minor,
+    patch,
+  };
+}
+
+function parseRange(range: string): Bound[][] | null {
+  const text = range.trim();
+  if (!text) return null;
+  if (/^(workspace|file|link|portal|git|git\+|https?|npm):/i.test(text)) return null;
+  if (text.includes('/')) return null;
+
+  const alternatives = text.split('||').map((part) => part.trim());
+  const parsed: Bound[][] = [];
+  for (const alternative of alternatives) {
+    const tokens = alternative.split(/\s+/).filter(Boolean);
+    if (!tokens.length) return null;
+    const bounds: Bound[] = [];
+    for (const token of tokens) {
+      const bound = parseBound(token);
+      // An unparseable token makes the whole range unknown rather than "satisfied".
+      if (!bound) return null;
+      bounds.push(bound);
+    }
+    parsed.push(bounds);
+  }
+  return parsed;
+}
+
+function compare(a: [number, number, number], b: [number, number, number]): number {
+  if (a[0] !== b[0]) return a[0] - b[0];
+  if (a[1] !== b[1]) return a[1] - b[1];
+  return a[2] - b[2];
+}
+
+function fits(bound: Bound, version: [number, number, number]): boolean {
+  const [major, minor, patch] = version;
+  const min: [number, number, number] = [bound.major, bound.minor ?? 0, bound.patch ?? 0];
+
+  switch (bound.operator) {
+    case '>=':
+      return compare(version, min) >= 0;
+    case '>':
+      return compare(version, min) > 0;
+    case '^':
+      if (bound.major > 0) return major === bound.major && compare(version, min) >= 0;
+      // 0.x: the caret pins the minor line.
+      return major === 0 && minor === (bound.minor ?? 0) && compare(version, min) >= 0;
+    case '~':
+      if (bound.minor === null) return major === bound.major && compare(version, min) >= 0;
+      return major === bound.major && minor === bound.minor && compare(version, min) >= 0;
+    case '=':
+    default:
+      if (bound.minor === null) return major === bound.major;
+      if (bound.patch === null) return major === bound.major && minor === bound.minor;
+      return compare(version, min) === 0;
+  }
+}
+
+/** Does `version` satisfy the declared range? `null` when the range is unparseable. */
+export function satisfiesRange(range: string, version: string): boolean | null {
+  const parsedVersion = parseVersion(version);
+  if (!parsedVersion) return null;
+  const parsedRange = parseRange(range);
+  if (parsedRange === null) return null;
+  if (parsedRange.length === 0) return true;
+  return parsedRange.some((bounds) => bounds.every((bound) => fits(bound, parsedVersion)));
+}
+
+/** `true` = the published version falls outside the declared range. */
+export function isOutdatedVersion(range: string, latest: string): boolean | null {
+  const satisfied = satisfiesRange(range, latest);
+  if (satisfied === null) return null;
+  return !satisfied;
+}
+

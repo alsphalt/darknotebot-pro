@@ -7,6 +7,7 @@ import { editorLimitFor, readFileCached } from '../files/service';
 import { summarizeJavaScript } from '../search/ast';
 import { searchCode } from '../search/engine';
 import { languageFor, secretKindFor } from '../views';
+import { fetchLatestVersions, registryCheckEnabled } from '../explorer/registry';
 import { listCases } from './cases';
 import { refreshCommandMetadata, scanServer } from './discovery';
 import {
@@ -279,11 +280,11 @@ async function readPackageJson(
   }
 }
 
-function packageView(
+async function packageView(
   pkg: { path: string; raw: string; parsed: Record<string, unknown> } | null,
   graph: ImportGraph,
   installed: string[] | null,
-): ExplorerPackageView {
+): Promise<ExplorerPackageView> {
   if (!pkg) {
     return {
       path: null,
@@ -301,7 +302,33 @@ function packageView(
   const devDependencies = (pkg.parsed.devDependencies as Record<string, string> | undefined) ?? {};
   const scripts = (pkg.parsed.scripts as Record<string, string> | undefined) ?? {};
   const imported = [...graph.external.keys()];
-  const analysis = analyseDependencies({ dependencies, devDependencies, imported, installedModules: installed });
+
+  /**
+   * Freshness is opt-in: `DARKNOTE_NPM_REGISTRY_CHECK=1`. Without it no request
+   * leaves the server and every `latest` stays null (reported as unknown, never
+   * as a guess).
+   */
+  let latest: Record<string, string> | null = null;
+  let registryNote: string | null = null;
+  if (registryCheckEnabled()) {
+    const names = [...Object.keys(dependencies), ...Object.keys(devDependencies)];
+    const checked = await fetchLatestVersions(names);
+    latest = {};
+    const failures: string[] = [];
+    for (const [name, value] of checked) {
+      if (value.latest) latest[name] = value.latest;
+      else if (value.error) failures.push(`${name}: ${value.error}`);
+    }
+    if (failures.length) registryNote = `Registry lookups failed for ${failures.length} package(s): ${failures.slice(0, 3).join('; ')}.`;
+  }
+
+  const analysis = analyseDependencies({
+    dependencies,
+    devDependencies,
+    imported,
+    installedModules: installed,
+    latest,
+  });
 
   const problems = [...analysis.problems];
   if (!Object.keys(scripts).length) {
@@ -317,9 +344,17 @@ function packageView(
     dependencies: analysis.entries,
     problems,
     installedCheck: installed ? 'checked' : 'unavailable',
-    note: installed
-      ? 'Versions are the declared ranges. "Missing" means the folder is absent from node_modules; outdated versions are not checked because no registry lookup is configured.'
-      : 'node_modules could not be listed (missing folder or no file.read permission), so installed state is unverified. Declared ranges are still shown.',
+    note: [
+      installed
+        ? 'Versions are the declared ranges. "Missing" means the folder is absent from node_modules.'
+        : 'node_modules could not be listed (missing folder or no file.read permission), so installed state is unverified. Declared ranges are still shown.',
+      registryCheckEnabled()
+        ? 'Published versions were checked against the declared ranges; "outdated" means the latest release falls outside them.'
+        : 'Published versions are not checked: set DARKNOTE_NPM_REGISTRY_CHECK=1 to compare declared ranges with the npm registry.',
+      registryNote,
+    ]
+      .filter(Boolean)
+      .join(' '),
   };
 }
 
@@ -392,7 +427,7 @@ export async function explorerOverview(server: ServerRecord): Promise<ExplorerOv
 
   const entry = entryView(server, files, graph, startup, pkg);
   const installed = await installedModulesFor(server);
-  const packageInformation = packageView(pkg, graph, installed);
+  const packageInformation = await packageView(pkg, graph, installed);
 
   const plugins = pluginGroups(files);
   const configFiles = files.filter((row) => isConfigPath(row.path) && !row.is_secret);
@@ -663,7 +698,7 @@ export async function explorerCategory(
   if (id === 'package') {
     const [graph, pkg] = await Promise.all([importGraphFor(server, index), readPackageJson(server, index)]);
     const installed = await installedModulesFor(server);
-    const view = packageView(pkg, graph, installed);
+    const view = await packageView(pkg, graph, installed);
     const items: ExplorerItem[] = [
       ...view.scripts.map((script) => ({
         id: `script:${script.name}`,
@@ -679,7 +714,9 @@ export async function explorerCategory(
         type: 'entry' as const,
         name: dep.name,
         subtitle: dep.range,
-        detail: `${dep.kind === 'dependency' ? 'dependency' : 'devDependency'} · imported ${dep.imported ? 'yes' : 'no'} · installed ${dep.installed}`,
+        detail: `${dep.kind === 'dependency' ? 'dependency' : 'devDependency'} · imported ${dep.imported ? 'yes' : 'no'} · installed ${dep.installed}${
+          dep.latest ? ` · latest ${dep.latest}` : ''
+        }`,
         path: view.path ?? undefined,
         badges: [dep.status],
         protected: false,
@@ -1079,7 +1116,18 @@ export async function explorerSearch(
     files.set(hit.path, entry);
   }
 
+  const coverage = await queryOne<{ uncached: string | number }>(
+    `select count(*)::int as uncached from file_indexes
+      where server_id = $1 and deleted_at is null and is_directory = false and content_cached = false`,
+    [server.id],
+  );
   const notes: string[] = [];
+  const uncached = Number(coverage?.uncached ?? 0);
+  if (uncached > 0) {
+    notes.push(
+      `${uncached} indexed file${uncached === 1 ? '' : 's'} could not be searched (binary, over the size limit, secret or unreadable).`,
+    );
+  }
   if (!textResult.hits.length && !symbolHits.length && !nameHits.length) {
     notes.push('Nothing matched. The search runs over indexed files; run a scan if the project changed.');
   }

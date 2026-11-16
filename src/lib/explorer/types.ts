@@ -61,7 +61,8 @@ export interface ExplorerDependency {
   kind: 'dependency' | 'devDependency';
   imported: boolean;
   installed: 'present' | 'missing' | 'unverified';
-  status: 'ok' | 'missing' | 'unused' | 'unpinned';
+  latest: string | null;
+  status: 'ok' | 'missing' | 'unused' | 'unpinned' | 'outdated';
 }
 
 export interface ExplorerPackageView {

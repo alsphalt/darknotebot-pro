@@ -1129,7 +1129,16 @@ function ItemRow({
               <span className="mono min-w-0 max-w-full truncate text-[12px] font-medium text-slate-100">{item.name}</span>
             )}
             {(item.badges ?? []).map((badge) => (
-              <Badge key={badge} tone={badge === "protected" || badge === "unreferenced" ? "warn" : badge === "entry point" ? "good" : "default"}>
+              <Badge
+                key={badge}
+                tone={
+                  badge === "entry point"
+                    ? "good"
+                    : ["protected", "unreferenced", "outdated", "missing", "unpinned"].includes(badge)
+                      ? "warn"
+                      : "default"
+                }
+              >
                 {badge}
               </Badge>
             ))}

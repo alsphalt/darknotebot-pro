@@ -22,7 +22,9 @@ import {
   configKeysOf,
   deletionBlockReason,
   isDataRecord,
+  isOutdatedVersion,
   resolvePackageMainPath,
+  satisfiesRange,
   parseStartupCommand,
   pluginNameOf,
   rankEntryCandidates,
@@ -123,6 +125,58 @@ test('package main resolves against the manifest directory', () => {
   assert.equal(resolvePackageMainPath('/sub/package.json', 'src/app.js'), '/sub/src/app.js');
   assert.equal(resolvePackageMainPath('/sub/package.json', './app.js'), './app.js');
   assert.equal(resolvePackageMainPath('/package.json', null), null);
+});
+
+test('declared ranges are compared without inventing a version', () => {
+  assert.equal(satisfiesRange('^1.2.3', '1.9.0'), true);
+  assert.equal(satisfiesRange('^1.2.3', '2.0.0'), false);
+  assert.equal(satisfiesRange('~1.2.3', '1.2.9'), true);
+  assert.equal(satisfiesRange('~1.2.3', '1.3.0'), false);
+  assert.equal(satisfiesRange('>=1.0.0', '3.1.0'), true);
+  assert.equal(satisfiesRange('1.2.x', '1.2.7'), true);
+  assert.equal(satisfiesRange('^0.4.1', '0.5.0'), false);
+  assert.equal(satisfiesRange('^1.0.0 || ^2.0.0', '2.4.0'), true);
+  assert.equal(satisfiesRange('workspace:*', '1.0.0'), null, 'unsupported ranges are unknown, not wrong');
+  assert.equal(isOutdatedVersion('^1.2.3', '1.4.0'), false);
+  assert.equal(isOutdatedVersion('^1.2.3', '2.0.0'), true);
+  assert.equal(isOutdatedVersion('git+https://example.com/x.git', '1.0.0'), null);
+});
+
+test('a dependency outside its declared range is reported as outdated', () => {
+  const analysis = analyseDependencies({
+    dependencies: { 'whatsapp-web.js': '^1.0.0', express: '^4.18.0' },
+    devDependencies: {},
+    imported: ['whatsapp-web.js', 'express'],
+    installedModules: ['whatsapp-web.js', 'express'],
+    latest: { 'whatsapp-web.js': '2.0.0', express: '4.21.2' },
+  });
+  const byName = Object.fromEntries(analysis.entries.map((entry) => [entry.name, entry]));
+  assert.equal(byName['whatsapp-web.js'].status, 'outdated');
+  assert.equal(byName['whatsapp-web.js'].latest, '2.0.0');
+  assert.equal(byName.express.status, 'ok');
+  assert.ok(analysis.problems.some((problem) => problem.code === 'outdated_dependency'));
+});
+
+test('registry lookups are bounded, per-package and non-fatal', async () => {
+  const { fetchLatestVersions, resetRegistryCacheForTests } = await import('../src/lib/explorer/registry.ts');
+  resetRegistryCacheForTests();
+  const seen: string[] = [];
+  const versions = await fetchLatestVersions(['alpha', 'beta', 'gamma'], {
+    fetcher: (async (url: string) => {
+      seen.push(String(url));
+      if (String(url).includes('beta')) return new Response('nope', { status: 500 });
+      if (String(url).includes('gamma')) throw new Error('offline');
+      return new Response(JSON.stringify({ version: '3.1.4' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(versions.get('alpha')?.latest, '3.1.4');
+  assert.equal(versions.get('beta')?.latest, null);
+  assert.match(String(versions.get('beta')?.error), /500/);
+  assert.match(String(versions.get('gamma')?.error), /offline/);
+  assert.equal(seen.length, 3);
 });
 
 test('config keys are read without leaking values', () => {
