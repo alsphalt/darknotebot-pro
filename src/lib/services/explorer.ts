@@ -17,6 +17,7 @@ import {
   configKeysOf,
   extensionOf,
   isConfigPath,
+  deletionBlockReason,
   isDataRecord,
   isDatabasePath,
   isScriptFile,
@@ -24,6 +25,7 @@ import {
   parseStartupCommand,
   pluginNameOf,
   rankEntryCandidates,
+  resolvePackageMainPath,
   resolveSpecifier,
   type ExplorerCategoryId,
 } from '../explorer/classify';
@@ -571,6 +573,38 @@ function entryView(
   };
 }
 
+/**
+ * Entry point without the import graph: the discovery page needs an answer
+ * without paying for a full parse. Same ranking rules as the explorer.
+ */
+export async function detectEntryPoint(server: ServerRecord): Promise<{
+  path: string | null;
+  evidence: string;
+  startupCommand: string | null;
+  note: string | null;
+  runtime: string | null;
+  packagePath: string | null;
+}> {
+  const [rows, startup] = await Promise.all([loadIndex(server), startupCommandFor(server)]);
+  const paths = rows.filter((row) => !row.is_directory).map((row) => row.path);
+  const pkg = await readPackageJson(server, rows);
+  const scripts = (pkg?.parsed.scripts as Record<string, string> | undefined) ?? {};
+  const detection = rankEntryCandidates({
+    files: [...paths],
+    startupCommand: startup.command,
+    packageMain: resolvePackageMainPath(pkg?.path, typeof pkg?.parsed.main === 'string' ? (pkg.parsed.main as string) : null),
+    packageScripts: scripts,
+  });
+  return {
+    path: detection.path,
+    evidence: detection.evidence,
+    startupCommand: startup.command,
+    note: detection.note,
+    runtime: detection.runtime,
+    packagePath: pkg?.path ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Plugins
 // ---------------------------------------------------------------------------
@@ -966,6 +1000,12 @@ export async function explorerFileInfo(server: ServerRecord, requestedPath: stri
     secret,
     secretKind: secretKindFor(path),
     editable: Boolean(!secret && !record && row && !row.is_directory),
+    deletable: Boolean(
+      !secret &&
+        !record &&
+        !deletionBlockReason(path, Boolean(row?.is_directory)) &&
+        path !== normalizeRemotePath(server.projectRoot),
+    ),
     protectedData: record,
     categories,
     draft: draft ? { id: draft.id, bytes: Number(draft.bytes ?? 0), updatedAt: draft.updated_at, status: draft.status } : null,

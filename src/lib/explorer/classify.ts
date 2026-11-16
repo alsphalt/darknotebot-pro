@@ -589,3 +589,43 @@ export function configKeysOf(path: string, content: string): string[] {
   }
   return [];
 }
+
+/** Folders the explorer must never delete, whatever the permissions say. */
+export const PROTECTED_DELETE_SEGMENTS = new Set([
+  '.git',
+  'node_modules',
+  'auth',
+  'sessions',
+  'session',
+]);
+
+/** Directories that hold production records or credentials, not source. */
+export const PROTECTED_DATA_SEGMENTS = new Set(['database', 'databases', 'db', 'data', 'storage']);
+
+/**
+ * Why a delete must be refused, or null when it is allowed.
+ *
+ * Files are checked by the caller for `isSecretPath`/`isDataRecord`; this covers
+ * the structural cases that a path-based check misses — deleting the folder that
+ * *contains* credentials or records is just as destructive as deleting them.
+ */
+export function deletionBlockReason(path: string, isDirectory: boolean): string | null {
+  const parts = segments(path).map((part) => part.toLowerCase());
+  const name = parts[parts.length - 1] ?? '';
+  const banned = parts.find((part) => PROTECTED_DELETE_SEGMENTS.has(part));
+  if (banned) return `"${banned}" is a system, dependency or credential folder and cannot be deleted from the explorer.`;
+  if (!isDirectory) return null;
+  if (PROTECTED_DATA_SEGMENTS.has(name)) {
+    return `"${name}" holds production data or credentials. Delete its contents individually, or use the panel.`;
+  }
+  return null;
+}
+
+/** package.json "main", resolved against the manifest's own directory. */
+export function resolvePackageMainPath(packageJsonPath: string | null | undefined, main: string | null): string | null {
+  if (!main) return null;
+  if (main.startsWith('/') || main.startsWith('.')) return main;
+  const dir = (packageJsonPath ?? '/package.json').split('/').slice(0, -1).join('/');
+  const combined = `${dir}/${main}`.replace(/\/{2,}/g, '/');
+  return combined.startsWith('/') ? combined : `/${combined}`;
+}

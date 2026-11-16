@@ -87,7 +87,7 @@ export default function ExplorerPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ path: string; isDirectory: boolean; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ path: string; name: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ path: string; destination: string } | null>(null);
@@ -201,12 +201,20 @@ export default function ExplorerPage() {
     }
   };
 
-  const deleteFile = async (path: string) => {
+  const requestDelete = (path: string, isDirectory = false) => {
+    setConfirmDelete({ path, isDirectory, name: path.split("/").filter(Boolean).pop() ?? path });
+  };
+
+  const deleteFile = async (target: { path: string; isDirectory: boolean; name: string }) => {
     if (!activeId) return;
     setBusy(true);
     try {
-      await apiDelete(`/api/explorer/file?serverId=${activeId}&path=${encodeURIComponent(path)}&confirm=DELETE`);
-      push(`Deleted ${path} — a backup was kept`, "ok");
+      // Folders require their own name as the token; files require DELETE.
+      const token = target.isDirectory ? target.name : "DELETE";
+      await apiDelete(
+        `/api/explorer/file?serverId=${activeId}&path=${encodeURIComponent(target.path)}&confirm=${encodeURIComponent(token)}`,
+      );
+      push(`Deleted ${target.path} — a backup was kept`, "ok");
       setConfirmDelete(null);
       setDetailOpen(false);
       await loadOverview();
@@ -498,7 +506,7 @@ export default function ExplorerPage() {
                           onRename={(path) => setRenameTarget({ path, name: path.split("/").pop() ?? "" })}
                           onMove={(path) => setMoveTarget({ path, destination: path.split("/").slice(0, -1).join("/") || "/" })}
                           onReplace={pickReplacement}
-                          onDelete={(path) => setConfirmDelete(path)}
+                          onDelete={(path) => requestDelete(path)}
                         />
                       ))}
                     </div>
@@ -667,7 +675,7 @@ export default function ExplorerPage() {
               >
                 <Download className="h-3 w-3" /> Download
               </button>
-              {detail.editable && (
+              {(detail.editable || detail.isDirectory) && (
                 <>
                   <button className="btn-ghost !px-2 !py-1.5 text-[11px]" onClick={() => setRenameTarget({ path: detail.path, name: detail.name })}>
                     <Pencil className="h-3 w-3" /> Rename
@@ -678,13 +686,20 @@ export default function ExplorerPage() {
                   >
                     Move
                   </button>
-                  <button className="btn-ghost !px-2 !py-1.5 text-[11px]" onClick={() => pickReplacement(detail.path)}>
-                    <Upload className="h-3 w-3" /> Replace
-                  </button>
-                  <button className="btn-danger !px-2 !py-1.5 text-[11px]" onClick={() => setConfirmDelete(detail.path)}>
-                    <Trash2 className="h-3 w-3" /> Delete
-                  </button>
+                  {detail.editable && (
+                    <button className="btn-ghost !px-2 !py-1.5 text-[11px]" onClick={() => pickReplacement(detail.path)}>
+                      <Upload className="h-3 w-3" /> Replace
+                    </button>
+                  )}
                 </>
+              )}
+              {detail.deletable && (
+                <button
+                  className="btn-danger !px-2 !py-1.5 text-[11px]"
+                  onClick={() => requestDelete(detail.path, detail.isDirectory)}
+                >
+                  <Trash2 className="h-3 w-3" /> Delete
+                </button>
               )}
             </div>
           ) : null
@@ -805,11 +820,19 @@ export default function ExplorerPage() {
         onClose={() => setConfirmDelete(null)}
         onConfirm={() => (confirmDelete ? void deleteFile(confirmDelete) : undefined)}
         busy={busy}
-        title="Delete this production file?"
+        title={confirmDelete?.isDirectory ? "Delete this folder?" : "Delete this production file?"}
+        requireText={confirmDelete?.isDirectory ? confirmDelete.name : undefined}
         description={
           <div className="space-y-2">
-            <p className="mono break-all text-[11px] text-slate-300">{confirmDelete}</p>
-            <p>The file is backed up as a version first, then removed from the panel. You can restore it from Backups &amp; Versions.</p>
+            <p className="mono break-all text-[11px] text-slate-300">{confirmDelete?.path}</p>
+            {confirmDelete?.isDirectory ? (
+              <p className="text-[11px] leading-relaxed text-amber-200">
+                Everything inside this folder is removed with it. Files are backed up as versions first; folders that
+                contain credentials or production records are refused.
+              </p>
+            ) : (
+              <p>The file is backed up as a version first, then removed from the panel. You can restore it from Backups &amp; Versions.</p>
+            )}
           </div>
         }
         confirmLabel="Back up & delete"

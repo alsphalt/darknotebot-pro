@@ -20,7 +20,9 @@ import {
   analyseDependencies,
   classifyPath,
   configKeysOf,
+  deletionBlockReason,
   isDataRecord,
+  resolvePackageMainPath,
   parseStartupCommand,
   pluginNameOf,
   rankEntryCandidates,
@@ -103,6 +105,24 @@ test('data records are protected, source files are not', () => {
   assert.equal(isDataRecord('/lib/db.js'), false);
   assert.equal(isSecretPathForTests('/.env'), true);
   assert.equal(isSecretPathForTests('/.env.example'), false);
+});
+
+test('folder deletion rules protect credentials, dependencies and data', () => {
+  assert.match(String(deletionBlockReason('/node_modules', true)), /dependency|system/i);
+  assert.match(String(deletionBlockReason('/.git', true)), /system|credential/i);
+  assert.match(String(deletionBlockReason('/auth', true)), /credential/i);
+  assert.match(String(deletionBlockReason('/sessions', true)), /credential/i);
+  assert.match(String(deletionBlockReason('/database', true)), /production data/i);
+  assert.match(String(deletionBlockReason('/data', true)), /production data/i);
+  assert.equal(deletionBlockReason('/plugins/menu', true), null);
+  assert.equal(deletionBlockReason('/plugins/menu/index.js', false), null);
+});
+
+test('package main resolves against the manifest directory', () => {
+  assert.equal(resolvePackageMainPath('/package.json', 'index.js'), '/index.js');
+  assert.equal(resolvePackageMainPath('/sub/package.json', 'src/app.js'), '/sub/src/app.js');
+  assert.equal(resolvePackageMainPath('/sub/package.json', './app.js'), './app.js');
+  assert.equal(resolvePackageMainPath('/package.json', null), null);
 });
 
 test('config keys are read without leaking values', () => {

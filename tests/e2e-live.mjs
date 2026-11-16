@@ -348,6 +348,46 @@ try {
   );
   ok('rescan picks up a newly created plugin file');
 
+  // ---- folder deletion guards --------------------------------------------
+  let dataDirRefused = false;
+  try {
+    await call('DELETE', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/database')}&confirm=database`);
+  } catch (error) {
+    dataDirRefused = /403|protected|production data/i.test(String(error.message));
+  }
+  assert.equal(dataDirRefused, true, 'a data folder must not be deletable');
+
+  let authRefused = false;
+  try {
+    await call('DELETE', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/auth')}&confirm=auth`);
+  } catch (error) {
+    authRefused = /403|credential|secret/i.test(String(error.message));
+  }
+  assert.equal(authRefused, true, 'a credential folder must not be deletable');
+  assert.ok(panel.read('/auth/creds.json'), 'credentials must still exist');
+
+  await call('POST', '/api/files/op', { action: 'mkdir', serverId, path: '/scratch/deep' });
+  let wrongToken = false;
+  try {
+    await call('DELETE', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/scratch')}&confirm=DELETE`);
+  } catch (error) {
+    wrongToken = /400|folder name|confirmation/i.test(String(error.message));
+  }
+  assert.equal(wrongToken, true, 'a folder delete must require the folder name, not a generic token');
+
+  const folderDelete = await call(
+    'DELETE',
+    `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/scratch')}&confirm=scratch`,
+  );
+  assert.deepEqual(folderDelete.deleted, ['/scratch']);
+  ok('folder deletion needs its own name and refuses data/credential folders');
+
+  // ---- the discovery page follows the real entry point -------------------
+  const discovery = await call('GET', `/api/servers/${serverId}/discover`);
+  const importantPaths = discovery.importantFiles.map((file) => file.path);
+  assert.ok(importantPaths.includes('/index.js'), `important files: ${importantPaths.join(', ')}`);
+  ok('discovery now lists the real entry point instead of a hardcoded filename list');
+
   // ---- power -------------------------------------------------------------
   for (const action of ['restart', 'stop', 'start']) {
     const result = await call('POST', '/api/monitor', { serverId, action, confirm: 'CONFIRM' });

@@ -37,6 +37,18 @@ file management (open/edit, download, replace, rename, move, create, delete) wit
 confirmation and pre-write backups. Protected: credentials are never read, database and
 data records cannot be edited or deleted.
 
+### Follow-up pass
+
+- **Folder deletion is now guarded server-side.** A directory needs its own name as the
+  confirmation token (not `DELETE`), and is refused when it is `.git`, `node_modules`,
+  `auth`, `sessions`, a data directory (`database`/`data`/`storage`), or when any indexed
+  descendant is a credential path or a data record. The UI asks for the folder name before
+  enabling the button.
+- **The discovery page no longer holds a hardcoded "important files" list** containing
+  `BIGBRO.js`. It calls `detectEntryPoint()` and lists the file the panel actually starts
+  plus the resolved `package.json`.
+- Unit tests: 2 new cases for the deletion rules and `resolvePackageMainPath`.
+
 ### Verified in this pass
 
 | Check | Result |

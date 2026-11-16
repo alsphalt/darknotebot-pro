@@ -142,6 +142,8 @@ export interface ExplorerFileInfo {
   secret: boolean;
   secretKind: string | null;
   editable: boolean;
+  /** False for credentials, records and protected folders. */
+  deletable: boolean;
   protectedData: boolean;
   categories: Array<{ id: ExplorerCategoryId; reason: string }>;
   draft: { id: string; bytes: number; updatedAt: string; status: string } | null;
