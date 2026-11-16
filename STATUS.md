@@ -2,6 +2,67 @@
 
 Last updated: 2026-11-16 · branch `main`
 
+
+## This pass
+
+### Code editor — blank surface (fixed)
+
+The tab header rendered (path, 391 KB, SHA) while the editor area stayed empty. Three
+independent causes were found and fixed:
+
+1. **Zero-height editor container.** The surface sat in `h-[calc(100%-52px)]` inside an
+   auto-height panel, so the percentage resolved to `auto`; `@monaco-editor/react` then
+   applied `height: 100%` to a 0 px box and Monaco laid out nothing. The surface is now
+   measured with a `ResizeObserver` and given an explicit pixel height (`CodeEditor`).
+2. **Monaco loaded from a CDN.** If that host is unreachable the loader never resolves and
+   the area stays blank forever. Monaco's AMD build is now served from `/monaco/vs`
+   (copied at install/build time, git-ignored) with a CDN fallback and a plain-text
+   surface as the last resort — the plain surface shows the real file, never placeholder.
+3. **Silent emptiness.** An empty body or a short read is now a hard error
+   (`checkLoadedContent`), the header prints the live character count, and `mode=full`
+   refuses a 200-with-empty-body when the panel reports bytes (`empty_body`).
+
+Also: non-UTF-8 files are refused instead of being decoded lossily, BOMs survive a
+round-trip, the editor font is a real font stack (Monaco measures glyphs through canvas,
+which does not understand `var(--font-mono)`), and an empty buffer cannot be written over
+a non-empty production file (client guard + server guard `empty_write_blocked`).
+
+### Project Explorer (new)
+
+`/explorer` plus `/api/explorer{,/category,/file,/search,/scan}`. Seven categories
+discovered from the indexed project (plugins, package.json, entry, cases, functions,
+config, database), global search merging symbols + names + line-level code hits, an
+import graph for relationships, a rescan that reports added/changed/deleted/renamed, and
+file management (open/edit, download, replace, rename, move, create, delete) with
+confirmation and pre-write backups. Protected: credentials are never read, database and
+data records cannot be edited or deleted.
+
+### Verified in this pass
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | 57/57 (`pipeline`, `monitor-editor`, `editor`, `explorer`, `routes`) |
+| `npm run build` | passes (Next 15 production build) |
+| `node tests/e2e-live.mjs` | **31/31** against `next start` + a 405-enforcing panel double (9 of them explorer checks) |
+| BIGBRO.js 391 KB | opened through `mode=full`, body length = `totalChars`, SHA-256 matches, draft saved, reload restored production, deploy kept every byte, original restored |
+| Explorer discovery | a deliberately different layout (`/plugins`, `/commands`, `/config`, `/database`, `/data`) resolves all seven categories, `menu` plugin grouped with 2 files, cases from 3 files with lines, entry = `/index.js` from `node index.js` |
+| Explorer safety | `/database/owner.json` delete → 403 `protected_data`; delete without confirmation → 400; `.env` never read; `.env.example` shows key names only |
+| Rescan | new file appears, identical-content delete+add reported as a rename, unrelated delete reported as deleted |
+
+### Not verified here
+
+- **Your real panel.** No credentials were supplied; everything above ran against a
+  protocol-accurate panel double. Categories reflect whatever the index contains — run
+  “Scan project” once on your server, then check the counts.
+- **A physical phone.** Layout is mobile-first (sheet navigation, large tap targets, no
+  horizontal page overflow) but verified at the HTML/asset level, not by touch.
+- **Outdated dependency versions.** No npm registry lookup is configured, so the UI
+  reports declared ranges, missing folders and undeclared imports — never a guessed
+  “latest” version.
+- **Import graph completeness.** The graph parses up to 400 cached files within a 12 MB
+  budget; larger projects report how many files were skipped.
+
 ## Verified here
 
 | Check | Result |

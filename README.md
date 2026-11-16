@@ -19,6 +19,7 @@ files.
 | **Overview / Live Monitor** | Live container state, CPU/RAM/disk, uptime and restart count from the panel; Start/Stop/Restart over `POST /power`; WhatsApp verdict from the bot process's own status file or its own connection events |
 | **Server Discovery** | Recursive walk of the actual filesystem → file index, SHA-256, AST-derived commands |
 | **File Manager** | Browse, create, rename, move, copy, delete, upload, ZIP import with path-traversal rejection, ZIP download |
+| **Project Explorer** | Deep discovery of plugins, cases, functions, config, dependencies and the real entry point, plus project-wide symbol/code search and safe file management |
 | **Code Editor** | Monaco, multi-tab, chunked load/save for multi-megabyte files, server-side drafts, validate → diff → deploy |
 | **Case Manager** | Every `switch` case parsed with an AST, edit/duplicate/delete with structural checks |
 | **Global Search** | Text, regex (ReDoS-guarded) and AST modes over indexed content, optional live re-verification |
@@ -167,6 +168,35 @@ Safety before any write: an empty (or whitespace-only) buffer cannot be saved or
 deployed over a file that has bytes on production, the panel response is checked
 for a 200-with-empty-body, non-UTF-8 files are refused rather than decoded lossily,
 and a deploy still re-reads production and compares SHA-256 before the restart.
+
+## Project Explorer
+
+`/explorer` answers "where is this in the bot?" without making you know the path.
+It is built entirely from the indexed project — the same rows the File Manager and
+Global Search use — plus a real parse of the source:
+
+| Category | How it is discovered |
+|---|---|
+| **Plugins** | Any file inside a `plugins`/`modules`/`extensions`/`commands`-style directory (whole segment match), grouped by its own directory; single-file plugins (`/plugins/menu.js`) are detected too. Each group shows its files, command count, function count, the packages it imports and which files load it. |
+| **package.json** | The shallowest manifest in the project. Declared ranges, scripts, which packages the code actually imports, which declared packages are missing from `node_modules`, and which imports are undeclared. Outdated versions are **not** guessed: there is no registry lookup, so the UI says so. |
+| **Entry point** | The file in the panel's `current_startup_command`, verified against the index; then `package.json` `main`, then the `scripts.start` command, then conventional names that actually exist, then highest import in-degree. Every candidate is listed with its score and evidence, and a startup file that does not exist is called out. |
+| **Cases / commands** | AST walk of every parsed JS/TS file (`command_metadata`), grouped by file with exact lines and aliases. Files that look like handlers but produced no cases are listed as *unparsed* instead of being hidden. |
+| **Functions / helpers** | Function declarations, arrow constants, class methods and exports per file with line numbers. |
+| **Configuration** | Config/settings filenames, `.env` templates and config folders. Only file names and **key names** are shown — `.env` and other credential files are listed as protected and never read. |
+| **Database / models / storage** | `.sql`, `.prisma`, model/connection code, plus `database/`, `data/`, `storage/` contents. Database files and JSON/CSV records are marked protected: downloadable, never editable or deletable from the explorer. |
+
+Global search merges three sources: symbol matches (case/function names), file and
+folder names, and line-level code matches, each linking straight into the editor at
+the right line.
+
+**Rescan** (`POST /api/explorer/scan`) walks the panel again, re-reads changed
+content, re-parses symbols and reports added / changed / deleted paths. A delete
+and an add with the same SHA-256 are reported as a rename. A scan never edits a
+project file.
+
+File relationships come from a real import graph: relative `require`/`import`
+specifiers are resolved through `.js/.cjs/.mjs/.json/index.*` candidates, so a file
+shows what it imports, what imports it, and which references are broken.
 
 ## Large files
 

@@ -54,7 +54,7 @@ function largeSource(bytes) {
     length += line.length + 1;
     index += 1;
   }
-  lines.push('module.exports = { handlers };', '');
+  lines.push('module.exports = { handlers, dispatch };', '');
   return lines.join('\n');
 }
 
@@ -64,6 +64,13 @@ function bigBroSource(bytes) {
     "'use strict';",
     '// DARKNOTE command module — the file the editor must show in full.',
     'const handlers = new Map();',
+    'async function dispatch(conn, m) {',
+    '  switch (m.text) {',
+    "    case '.menu': { await m.reply('menu'); break; }",
+    "    case '.ping': { await m.reply('pong'); break; }",
+    "    default: { break; }",
+    '  }',
+    '}',
   ];
   let length = lines.join('\n').length;
   let index = 0;
@@ -73,7 +80,7 @@ function bigBroSource(bytes) {
     length += line.length + 1;
     index += 1;
   }
-  lines.push('module.exports = { handlers };', '');
+  lines.push('module.exports = { handlers, dispatch };', '');
   return lines.join('\n');
 }
 
@@ -91,6 +98,31 @@ const panel = await createMockPanel({
     '/README.md': '# DARKNOTE L2\n\nA WhatsApp bot.\n\n## Commands\n- .menu\n- .ping\n',
     '/styles.css': ':root { --accent: #6d5efc; }\nbody { background: #05060a; color: #e7eaf3; }\n',
     '/notes.txt': 'plain text notes\nsecond line\n',
+    '/package.json': JSON.stringify(
+      {
+        name: 'darknote-l2',
+        version: '1.0.0',
+        main: 'index.js',
+        scripts: { start: 'node index.js', deploy: 'git pull && node index.js' },
+        dependencies: { 'whatsapp-web.js': '^1.23.0' },
+      },
+      null,
+      2,
+    ),
+    '/plugins/menu/index.js': `'use strict';
+const { smsg } = require('../../lib/msg');
+async function handleMenu(conn, m) {
+  const command = m.text.slice(1).split(' ')[0];
+  switch (command) {
+    case 'menu': { await m.reply('menu'); break; }
+    case 'list': { await m.reply('list'); break; }
+    default: break;
+  }
+}
+module.exports = { handleMenu };
+`,
+    '/commands/ping.js': `module.exports = { name: 'ping', run: async (m) => { switch (m.text) { case '.ping': { await m.reply('pong'); break; } default: break; } } };
+`,
   },
 }).start();
 
@@ -230,6 +262,92 @@ try {
   assert.ok(tested.capabilities.some((check) => check.ok === true), 'at least the read checks must pass');
   ok(`connection test ran (${tested.capabilities.filter((check) => check.ok).length}/${tested.capabilities.length} checks ok)`);
 
+  // ---- project explorer --------------------------------------------------
+  const scan = await call('POST', '/api/explorer/scan', { serverId, deep: true });
+  assert.ok(scan.indexed > 5, `expected the explorer scan to index files, got ${scan.indexed}`);
+  assert.equal(Array.isArray(scan.added), true);
+  ok(`explorer scan walked the project (${scan.indexed} indexed, ${scan.cases} cases, ${scan.functions} functions)`);
+
+  const explorer = await call('GET', `/api/explorer?serverId=${serverId}`);
+  const categoryIds = explorer.categories.map((category) => category.id);
+  assert.deepEqual(categoryIds, ['plugins', 'package', 'entry', 'cases', 'functions', 'config', 'database']);
+  assert.equal(explorer.entry.path, '/index.js', 'the entry must be the file the panel starts');
+  assert.equal(explorer.entry.startupCommand, 'node index.js');
+  const categoryById = Object.fromEntries(explorer.categories.map((category) => [category.id, category]));
+  assert.ok(categoryById.plugins.count >= 2, 'plugins must be discovered from the real folders');
+  assert.ok(categoryById.cases.count >= 4, 'cases must be discovered across several files');
+  assert.ok(categoryById.database.count >= 1);
+  assert.ok(categoryById.config.count >= 1);
+  ok(
+    `explorer overview: ${explorer.index.files} files, ${explorer.index.caseCount} cases, ${explorer.index.functionCount} functions, entry ${explorer.entry.path}`,
+  );
+
+  const pluginView = await call('GET', `/api/explorer/category?serverId=${serverId}&id=plugins`);
+  const pluginNames = pluginView.items.map((item) => item.name);
+  assert.ok(pluginNames.includes('menu'), `plugin items: ${pluginNames.join(', ')}`);
+  assert.ok(pluginView.items.find((item) => item.name === 'menu').children.some((child) => child.path === '/plugins/menu/index.js'));
+  ok(`plugins category grouped ${pluginView.total} plugin(s) including "menu"`);
+
+  const caseView = await call('GET', `/api/explorer/category?serverId=${serverId}&id=cases`);
+  const casePaths = caseView.items.map((item) => item.path);
+  assert.ok(casePaths.includes('/BIGBRO.js'), `cases from BIGBRO.js must be found (got ${casePaths.join(', ')})`);
+  assert.ok(casePaths.includes('/plugins/menu/index.js'), 'cases from a plugin file must be found');
+  assert.ok(
+    caseView.items.every((item) => (item.children ?? []).every((child) => typeof child.line === 'number' && child.line > 0)),
+    'every case must carry a line number',
+  );
+  ok(`cases category found ${caseView.total} file(s) of commands with exact lines`);
+
+  const entryView = await call('GET', `/api/explorer/category?serverId=${serverId}&id=entry`);
+  assert.ok(entryView.items.some((item) => item.path === '/index.js' && item.badges.includes('entry point')));
+
+  const packageView = await call('GET', `/api/explorer/category?serverId=${serverId}&id=package`);
+  assert.ok(packageView.items.some((item) => item.name === 'npm run start'));
+  ok('entry + package.json categories resolved from the panel');
+
+  const search = await call('GET', `/api/explorer/search?serverId=${serverId}&q=menu`);
+  assert.ok(search.symbols.some((symbol) => symbol.name === 'menu'), 'a case must be searchable by name');
+  assert.ok(search.files.some((file) => file.path === '/BIGBRO.js' && file.hits.length > 0), 'code locations must be returned');
+  ok(`search found the "menu" command in ${search.files.length} file(s) with line-level hits`);
+
+  const fileInfo = await call('GET', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/plugins/menu/index.js')}`);
+  assert.ok(fileInfo.symbols.cases.some((entry) => entry.name === 'menu'));
+  assert.ok(fileInfo.symbols.functions.some((entry) => entry.name === 'handleMenu'));
+  assert.equal(fileInfo.imports.find((entry) => entry.specifier === '../../lib/msg')?.resolvedPath, '/lib/msg.js');
+  const libInfo = await call('GET', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/lib/msg.js')}`);
+  assert.ok(libInfo.importedBy.some((entry) => entry.path === '/plugins/menu/index.js'), 'reverse dependencies must resolve');
+  ok('file information returns symbols, resolved imports and reverse dependencies');
+
+  // Protected production records cannot be deleted from the explorer.
+  let protectedRefused = false;
+  try {
+    await call('DELETE', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/database/owner.json')}&confirm=DELETE`);
+  } catch (error) {
+    protectedRefused = /403|protected/i.test(String(error.message));
+  }
+  assert.equal(protectedRefused, true, 'a data record must be refused');
+  assert.ok(panel.read('/database/owner.json'), 'the data record must still exist');
+
+  let confirmRequired = false;
+  try {
+    await call('DELETE', `/api/explorer/file?serverId=${serverId}&path=${encodeURIComponent('/notes.txt')}`);
+  } catch (error) {
+    confirmRequired = /400|confirmation/i.test(String(error.message));
+  }
+  assert.equal(confirmRequired, true, 'a delete without confirmation must be refused');
+  ok('explorer refuses protected records and unconfirmed deletes');
+
+  // A rescan must reflect files added in the panel.
+  panel.externalEdit('/plugins/menu/added-later.js', "module.exports = { late: true };\n");
+  const rescanned = await call('POST', '/api/explorer/scan', { serverId, deep: true });
+  assert.ok(rescanned.added.includes('/plugins/menu/added-later.js'), `added: ${rescanned.added.join(', ')}`);
+  const afterRescan = await call('GET', `/api/explorer/category?serverId=${serverId}&id=plugins`);
+  assert.ok(
+    afterRescan.items.find((item) => item.name === 'menu').children.some((child) => child.path === '/plugins/menu/added-later.js'),
+    'the new file must appear after rescanning',
+  );
+  ok('rescan picks up a newly created plugin file');
+
   // ---- power -------------------------------------------------------------
   for (const action of ['restart', 'stop', 'start']) {
     const result = await call('POST', '/api/monitor', { serverId, action, confirm: 'CONFIRM' });
@@ -286,7 +404,7 @@ try {
   assert.equal(sha256(bigroFull.content), bigroFull.sha256, 'the body must hash to the reported SHA-256');
   assert.equal(bigroFull.content, BIGBRO, 'the body must be the production file itself');
   assert.ok(bigroFull.content.startsWith('#!/usr/bin/env node'));
-  assert.ok(bigroFull.content.trimEnd().endsWith('module.exports = { handlers };'));
+  assert.ok(bigroFull.content.trimEnd().endsWith('module.exports = { handlers, dispatch };'));
   assert.equal(bigroFull.validation.ok, true, 'the real source must parse');
   ok('BIGBRO.js opened through mode=full with the complete source and a matching SHA-256');
 
