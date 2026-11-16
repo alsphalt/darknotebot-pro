@@ -342,10 +342,10 @@ export default function ExplorerPage() {
         description="Discovers the real project structure through the panel API: plugins, cases, functions, configuration, dependencies and the actual entry point."
         actions={
           <>
-            <button className="btn-ghost !px-2.5 !py-1.5 text-[11px]" onClick={() => setNavOpen(true)}>
+            <button className="btn-ghost !px-3 !py-2 text-[11px]" onClick={() => setNavOpen(true)}>
               <FolderTree className="h-3.5 w-3.5" /> Folders
             </button>
-            <button className="btn-primary !px-2.5 !py-1.5 text-[11px]" onClick={() => void rescan()} disabled={scanning}>
+            <button className="btn-primary !px-3 !py-2 text-[11px]" onClick={() => void rescan()} disabled={scanning}>
               {scanning ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />} {scanning ? "Scanning…" : "Rescan"}
             </button>
           </>
@@ -1117,30 +1117,30 @@ function ItemRow({
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           {item.path && item.editable && (
-            <Link href={editorHref(item.path)} className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-white" title="Open in editor">
+            <Link href={editorHref(item.path)} className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-white" title="Open in editor">
               <ExternalLink className="h-3.5 w-3.5" />
             </Link>
           )}
           {item.path && (
-            <button className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onInfo(item.path!)} title="File information">
+            <button className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onInfo(item.path!)} title="File information">
               <Info className="h-3.5 w-3.5" />
             </button>
           )}
           {item.path && item.editable && (
             <>
-              <button className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onReplace(item.path!)} title="Replace file">
+              <button className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onReplace(item.path!)} title="Replace file">
                 <Upload className="h-3.5 w-3.5" />
               </button>
-              <button className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onRename(item.path!)} title="Rename">
+              <button className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={() => onRename(item.path!)} title="Rename">
                 <Pencil className="h-3.5 w-3.5" />
               </button>
-              <button className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-rose-300" onClick={() => onDelete(item.path!)} title="Delete">
+              <button className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-rose-300" onClick={() => onDelete(item.path!)} title="Delete">
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </>
           )}
           {hasChildren && (
-            <button className="rounded p-1.5 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={onToggle} title="Show items">
+            <button className="rounded p-2 text-slate-400 hover:bg-ink-800 hover:text-white" onClick={onToggle} title="Show items">
               <ChevronRight className={`h-3.5 w-3.5 transition ${expanded ? "rotate-90" : ""}`} />
             </button>
           )}
