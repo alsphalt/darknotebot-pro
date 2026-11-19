@@ -5,6 +5,8 @@ import { currentCsrfToken, requirePermission, requireUser, type SessionUser } fr
 import type { Permission } from './auth/permissions';
 import { PterodactylError } from './pterodactyl/client';
 import { PathError } from './security/paths';
+import { captureError } from './errors/store';
+import type { ErrorSource } from './errors/types';
 
 export class ApiError extends Error {
   status: number;
@@ -22,14 +24,81 @@ export function ok<T>(data: T, init?: ResponseInit): NextResponse {
   return NextResponse.json({ ok: true, data }, init);
 }
 
-export function fail(error: unknown): NextResponse {
+export interface FailContext {
+  method?: string;
+  path?: string;
+  userId?: string | null;
+  serverId?: string | null;
+}
+
+function sourceForPath(pathname: string | undefined): ErrorSource {
+  if (!pathname) return 'api';
+  if (/^\/api\/auth\b/.test(pathname)) return 'auth';
+  if (/^\/api\/files\b|^\/api\/downloads\b/.test(pathname)) return 'files';
+  if (/^\/api\/drafts\b|^\/api\/versions\b/.test(pathname)) return 'editor';
+  if (/^\/api\/deployments\b/.test(pathname)) return 'deployment';
+  if (/^\/api\/backups\b/.test(pathname)) return 'storage';
+  if (/^\/api\/console\b/.test(pathname)) return 'console';
+  if (/^\/api\/monitor\b/.test(pathname)) return 'console';
+  if (/^\/api\/servers\b/.test(pathname)) return 'panel';
+  return 'api';
+}
+
+/**
+ * Record a failed request in Error Intelligence. Deliberately runs after the
+ * response shape is decided and can never throw into the caller.
+ */
+function recordFailure(error: unknown, context: FailContext, status: number, code: string): void {
+  const pathname = context.path;
+  const isPanel = error instanceof PterodactylError;
+  const source: ErrorSource = isPanel
+    ? 'panel'
+    : error instanceof PathError
+      ? sourceForPath(pathname) === 'api'
+        ? 'files'
+        : sourceForPath(pathname)
+      : code === 'csrf_failed' || code === 'unauthenticated' || code === 'forbidden'
+        ? 'auth'
+        : sourceForPath(pathname);
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : 'An unknown failure occurred';
+
+  const pterodactyl = error instanceof PterodactylError ? error : null;
+  captureError({
+    message,
+    source,
+    code: pterodactyl?.code ?? code,
+    stack: error instanceof Error ? error.stack ?? null : null,
+    serverId: context.serverId ?? null,
+    userId: context.userId ?? null,
+    endpoint: pterodactyl?.endpoint || pathname || null,
+    httpMethod: context.method ?? null,
+    httpStatus: pterodactyl?.status || status,
+    context: {
+      route: pathname ?? null,
+      errorName: error instanceof Error ? error.name : typeof error,
+    },
+  });
+}
+
+export function fail(error: unknown, context: FailContext = {}): NextResponse {
   if (error instanceof ApiError) {
+    // Confirmation prompts and "already applied" are user intent, not failures.
+    if (!['confirmation_required'].includes(error.code)) {
+      recordFailure(error, context, error.status, error.code);
+    }
     return NextResponse.json(
       { ok: false, error: error.message, code: error.code, details: error.details },
       { status: error.status },
     );
   }
   if (error instanceof ZodError) {
+    recordFailure(error, context, 422, 'validation_error');
     return NextResponse.json(
       {
         ok: false,
@@ -41,9 +110,11 @@ export function fail(error: unknown): NextResponse {
     );
   }
   if (error instanceof PathError) {
+    recordFailure(error, context, 400, 'unsafe_path');
     return NextResponse.json({ ok: false, error: error.message, code: 'unsafe_path' }, { status: 400 });
   }
   if (error instanceof PterodactylError) {
+    recordFailure(error, context, error.status || 502, error.code);
     if (error.code === 'file_too_large') {
       return NextResponse.json(
         { ok: false, error: error.message, code: error.code, details: { endpoint: error.endpoint } },
@@ -64,15 +135,18 @@ export function fail(error: unknown): NextResponse {
   }
   const statusCode = (error as { statusCode?: number })?.statusCode;
   if (statusCode === 401) {
+    recordFailure(error, context, 401, 'unauthenticated');
     return NextResponse.json({ ok: false, error: 'Not authenticated', code: 'unauthenticated' }, { status: 401 });
   }
   if (statusCode === 403) {
+    recordFailure(error, context, 403, 'forbidden');
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : 'Forbidden', code: 'forbidden' },
       { status: 403 },
     );
   }
   const message = error instanceof Error ? error.message : 'Unexpected server error';
+  recordFailure(error, context, 500, 'server_error');
   if (process.env.NODE_ENV !== 'production') {
     // eslint-disable-next-line no-console
     console.error('[darknote] api error:', error);
@@ -117,9 +191,11 @@ export function route<P extends Params = Params>(
   handler: (args: HandlerArgs<P>) => Promise<Response>,
 ) {
   return async (req: NextRequest, ctx: { params: Promise<P> }): Promise<Response> => {
+    let actor: SessionUser | null = null;
     try {
       if (options.csrf !== false) await assertCsrf(req);
       const user = options.permission ? await requirePermission(options.permission) : await requireUser();
+      actor = user;
       const params = ctx?.params ? await ctx.params : ({} as P);
       const body = async <T>(schema: ZodSchema<T>): Promise<T> => {
         let raw: unknown;
@@ -132,7 +208,12 @@ export function route<P extends Params = Params>(
       };
       return await handler({ req, user, params, body });
     } catch (error) {
-      return fail(error);
+      return fail(error, {
+        method: req.method,
+        path: new URL(req.url).pathname,
+        userId: actor?.id ?? null,
+        serverId: new URL(req.url).searchParams.get('serverId'),
+      });
     }
   };
 }

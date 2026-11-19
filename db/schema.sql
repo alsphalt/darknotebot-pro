@@ -379,3 +379,142 @@ create table if not exists server_settings (
   updated_at timestamptz not null default now(),
   primary key (server_id, key)
 );
+
+-- ---------------------------------------------------------------------------
+-- 24. ERROR INTELLIGENCE
+-- Every captured failure, its diagnosis and its repair state. One row per
+-- distinct problem (fingerprint), with an occurrence counter for repeats.
+-- server_id is nullable: API/frontend/auth failures can happen before a server
+-- is selected and are still worth explaining.
+-- ---------------------------------------------------------------------------
+create table if not exists error_events (
+  id              text primary key,
+  server_id       text references connected_servers(id) on delete cascade,
+  user_id         text,
+  fingerprint     text not null,
+  title           text not null,
+  code            text not null,
+  message         text not null,
+  source          text not null,              -- whatsapp|panel|console|api|frontend|auth|websocket|files|editor|explorer|deployment|packages|power|storage|database
+  severity        text not null default 'moderate',  -- critical|moderate|minor
+  status          text not null default 'active',    -- active|resolved|ignored
+  occurrences     integer not null default 1,
+  first_seen_at   timestamptz not null default now(),
+  last_seen_at    timestamptz not null default now(),
+  file_path       text,
+  line_number     integer,
+  column_number   integer,
+  function_name   text,
+  endpoint        text,
+  http_method     text,
+  http_status     integer,
+  root_cause      text,
+  why             text,
+  recommendation  text,
+  evidence        jsonb not null default '[]'::jsonb,
+  context         jsonb not null default '{}'::jsonb,
+  repair          jsonb not null default '{}'::jsonb,
+  resolved_at     timestamptz,
+  resolved_by     text,
+  resolution_note text,
+  updated_at      timestamptz not null default now()
+);
+create unique index if not exists error_events_fingerprint_key on error_events (fingerprint);
+create index if not exists error_events_status_idx on error_events (status, last_seen_at desc);
+create index if not exists error_events_server_idx on error_events (server_id, last_seen_at desc);
+create index if not exists error_events_source_idx on error_events (source, last_seen_at desc);
+create index if not exists error_events_severity_idx on error_events (severity, last_seen_at desc);
+
+-- ---------------------------------------------------------------------------
+-- 25. BIGBROTHER AI — conversations, memory, tutorials and assets
+-- Conversations and memory belong to one account. Every read and write is
+-- scoped by user_id; there is no cross-account query path in the services.
+-- ---------------------------------------------------------------------------
+create table if not exists bigbrother_conversations (
+  id            text primary key,
+  user_id       text not null references admin_users(id) on delete cascade,
+  server_id     text references connected_servers(id) on delete set null,
+  title         text not null default 'New conversation',
+  message_count integer not null default 0,
+  last_intent   text,
+  archived      boolean not null default false,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists bigbrother_conversations_user_idx
+  on bigbrother_conversations (user_id, updated_at desc);
+
+create table if not exists bigbrother_messages (
+  id              text primary key,
+  conversation_id text not null references bigbrother_conversations(id) on delete cascade,
+  user_id         text not null,
+  role            text not null,               -- user|assistant|system
+  content         text not null,
+  blocks          jsonb not null default '[]'::jsonb,
+  citations       jsonb not null default '[]'::jsonb,
+  actions         jsonb not null default '[]'::jsonb,
+  intent          text,
+  engine          text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists bigbrother_messages_conversation_idx
+  on bigbrother_messages (conversation_id, created_at asc);
+
+create table if not exists bigbrother_memory (
+  user_id    text not null references admin_users(id) on delete cascade,
+  key        text not null,
+  value      jsonb not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, key)
+);
+
+create table if not exists bigbrother_assets (
+  id          text primary key,
+  user_id     text not null references admin_users(id) on delete cascade,
+  kind        text not null default 'image',
+  filename    text not null,
+  mime        text not null,
+  size_bytes  integer not null default 0,
+  storage_key text not null,
+  width       integer,
+  height      integer,
+  created_at  timestamptz not null default now()
+);
+create index if not exists bigbrother_assets_user_idx on bigbrother_assets (user_id, created_at desc);
+
+create table if not exists bigbrother_tutorials (
+  id          text primary key,
+  user_id     text not null references admin_users(id) on delete cascade,
+  title       text not null,
+  summary     text,
+  keywords    jsonb not null default '[]'::jsonb,
+  is_published boolean not null default true,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create index if not exists bigbrother_tutorials_user_idx on bigbrother_tutorials (user_id, updated_at desc);
+
+create table if not exists bigbrother_tutorial_steps (
+  id           text primary key,
+  tutorial_id  text not null references bigbrother_tutorials(id) on delete cascade,
+  idx          integer not null,
+  title        text not null,
+  body         text not null,
+  asset_id     text references bigbrother_assets(id) on delete set null,
+  link_href    text,
+  created_at   timestamptz not null default now()
+);
+create unique index if not exists bigbrother_tutorial_steps_key
+  on bigbrother_tutorial_steps (tutorial_id, idx);
+
+create table if not exists bigbrother_usage (
+  id          bigserial primary key,
+  user_id     text,
+  kind        text not null,                   -- chat|tool|llm|upload
+  engine      text,
+  ok          boolean not null default true,
+  duration_ms integer not null default 0,
+  detail      jsonb not null default '{}'::jsonb,
+  created_at  timestamptz not null default now()
+);
+create index if not exists bigbrother_usage_created_idx on bigbrother_usage (created_at desc);

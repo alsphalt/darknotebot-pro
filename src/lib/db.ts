@@ -14,7 +14,7 @@ export interface DbClient extends DbConnection {
   transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface Cache {
   client?: Promise<DbClient>;
@@ -152,6 +152,10 @@ async function migrate(client: DbClient): Promise<void> {
     await client.query(`alter table editor_drafts add column if not exists chunk_count integer`);
   }
 
+  // v3: Error Intelligence (error_events) and BIGBROTHER (conversations,
+  // messages, memory, assets, tutorials, usage). schema.sql is idempotent, so
+  // the table block above already creates them; this block only records the
+  // migration marker and keeps the version list consistent.
   await client.query(`insert into schema_migrations (version) values ($1) on conflict do nothing`, [
     SCHEMA_VERSION,
   ]);

@@ -6,6 +6,7 @@ import type { ServerRecord } from '../servers/repo';
 import { serverClient } from '../servers/repo';
 import { sleep } from '../util/async';
 import type { PterodactylClient } from '../pterodactyl/client';
+import { ingestConsoleLine } from '../errors/collect';
 
 const MAX_LINES = 1500;
 const MAX_RECONNECTS = 8;
@@ -259,6 +260,9 @@ function appendLine(serverId: string, raw: string): void {
   buffer.revision += 1;
   buffer.lastMessageAt = Date.now();
   applyWhatsAppLine(buffer.whatsapp, text);
+  // Every captured line also feeds Error Intelligence. This is the only place
+  // the console buffer is written, so no producer can bypass diagnosis.
+  void ingestConsoleLine(serverId, text);
 }
 
 function scheduleReconnect(session: Session, reason: string): void {

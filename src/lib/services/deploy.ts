@@ -9,6 +9,7 @@ import { backupStorage } from '../backups/storage';
 import { baseName, confineToRoot, extensionOf, isSecretPath, isProbablyBinary } from '../security/paths';
 import { waitForStartup, power } from './console';
 import { logActivity } from '../audit';
+import { captureError } from '../errors/store';
 import type { Principal } from '../auth/permissions';
 
 export interface ChangeRequest {
@@ -33,7 +34,7 @@ export interface DeploymentOutcome {
   status: 'succeeded' | 'failed' | 'rolled_back';
   files: DeploymentFileResult[];
   restarted: boolean;
-  health: { verdict: string; detail: string; observedStates?: string[] };
+  health: { verdict: string; detail: string; observedStates?: string[]; logs?: string[] };
   logs: Array<{ level: string; step: string | null; message: string; at: string }>;
   error?: string;
   warnings: string[];
@@ -269,6 +270,15 @@ export async function deployChanges(options: {
       await log(health.verdict === 'healthy' ? 'success' : fatal ? 'error' : 'warn', 'health', health.detail);
       if (fatal) {
         failure = `Startup health check failed: ${health.detail}`;
+        captureError({
+          message: failure,
+          source: 'deployment',
+          serverId: server.id,
+          code: 'deployment_health_failed',
+          userId: user.id,
+          context: { deploymentId, health, logs: health.logs?.slice(-20) ?? [] },
+          evidence: health.logs?.slice(-5) ?? [],
+        });
       }
     } else {
       const client = await serverClient(server);
@@ -358,6 +368,16 @@ export async function deployChanges(options: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await log('error', 'abort', `Deployment aborted: ${message}`);
+    captureError({
+      message,
+      source: 'deployment',
+      serverId: server.id,
+      code: error instanceof ApiError ? error.code : undefined,
+      userId: user.id,
+      httpStatus: error instanceof ApiError ? error.status : undefined,
+      context: { deploymentId, files: changes.map((change) => change.path) },
+      evidence: [message],
+    });
     const written = fileResults.filter((result) => result.status === 'written');
     if (written.length) {
       await rollbackFiles(deploymentId, server, user, fileResults);

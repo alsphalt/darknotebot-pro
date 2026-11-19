@@ -5,6 +5,7 @@ import { query, queryOne, jsonb, parseJsonb } from '../db';
 import { env } from '../env';
 import { hashSessionToken, randomToken, safeEqual, uuid } from '../crypto';
 import { hashPassword, verifyPassword } from './passwords';
+import { captureError } from '../errors/store';
 import {
   assertPermission,
   hasPermission,
@@ -138,6 +139,20 @@ export async function login(
         [user.id, env.loginMaxAttempts, new Date(Date.now() + 15 * 60_000).toISOString()],
       );
     }
+    captureError({
+      message:
+        reason === 'locked'
+          ? `Sign-in refused for ${normalized}: the account is locked after repeated failed attempts (${ip}).`
+          : reason === 'unknown_user'
+            ? `Sign-in attempt for an unknown account (${normalized}) from ${ip}.`
+            : `Sign-in failed for ${normalized} from ${ip}: the password did not match.`,
+      source: 'auth',
+      code: reason,
+      userId: user?.id ?? null,
+      httpStatus: reason === 'locked' ? 429 : 401,
+      context: { email: normalized, ip, reason },
+      evidence: [`reason: ${reason}`, `ip: ${ip}`],
+    });
     return { ok: false, error: 'Invalid email or password.' };
   };
 

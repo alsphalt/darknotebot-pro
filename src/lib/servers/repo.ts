@@ -4,8 +4,9 @@ import { uuid } from '../crypto';
 import { decryptSecret } from '../crypto';
 import { ApiError } from '../api';
 import type { Permission, Principal } from '../auth/permissions';
-import { createClient, maxEditorCeiling, normalizePanelUrl, PterodactylClient } from '../pterodactyl/client';
+import { createClient, maxEditorCeiling, normalizePanelUrl, PterodactylClient, PterodactylError } from '../pterodactyl/client';
 import { DEFAULT_EXCLUDED_PATHS, isExcluded, normalizeRoot } from '../security/paths';
+import { captureError } from '../errors/store';
 
 export interface ServerRecord {
   id: string;
@@ -296,6 +297,17 @@ export async function testConnection(server: ServerRecord): Promise<{
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    captureError({
+      message,
+      source: 'panel',
+      serverId: server.id,
+      code: error instanceof PterodactylError ? error.code : undefined,
+      endpoint: error instanceof PterodactylError ? error.endpoint : '/api/client/servers',
+      httpMethod: 'GET',
+      httpStatus: error instanceof PterodactylError ? error.status : 0,
+      context: { panelUrl: server.panelUrl, identifier: server.serverIdentifier, origin: 'connection-test' },
+      evidence: [message],
+    });
     return { ok: false, latencyMs: Date.now() - started, error: message };
   }
 }

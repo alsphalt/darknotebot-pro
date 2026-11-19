@@ -19,14 +19,19 @@ import {
   Radar,
   Search,
   Settings,
+  ShieldAlert,
   ShieldCheck,
+  Sparkles,
   TerminalSquare,
   Workflow,
   X,
 } from "lucide-react";
+import { useEffect } from "react";
 import { useServers } from "./providers";
 import { Status } from "./ui";
-import { apiPost } from "@/lib/client";
+import { apiGet, apiPost } from "@/lib/client";
+import { BigBrotherOrb } from "./bigbrother/orb";
+import { ErrorReporter } from "./error-reporter";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -41,6 +46,8 @@ const NAV = [
   { href: "/backups", label: "Backups & Versions", icon: Database },
   { href: "/downloads", label: "Download Center", icon: Download },
   { href: "/console", label: "Terminal & Logs", icon: TerminalSquare },
+  { href: "/errors", label: "Error Center", icon: ShieldAlert },
+  { href: "/bigbrother", label: "BIGBROTHER AI", icon: Sparkles },
   { href: "/settings", label: "Admin Settings", icon: Settings },
 ];
 
@@ -55,6 +62,20 @@ export function AppShell({
   const { servers, activeServer, activeId, setActiveId, loading } = useServers();
   const [open, setOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [openProblems, setOpenProblems] = useState(0);
+
+  // One cheap read per session so the floating orb can show a real problem dot.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ counts: { openProblems: number } }>("/api/bigbrother/status")
+      .then((data) => {
+        if (!cancelled) setOpenProblems(data.counts.openProblems);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const signOut = async () => {
     await apiPost("/api/auth/logout").catch(() => undefined);
@@ -231,6 +252,9 @@ export function AppShell({
 
         <main className="mx-auto w-full max-w-[1500px] px-3 py-4 sm:px-6 sm:py-6">{children}</main>
       </div>
+
+      <ErrorReporter />
+      <BigBrotherOrb hasProblems={openProblems > 0} />
     </div>
   );
 }
