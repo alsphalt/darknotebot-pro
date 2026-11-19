@@ -271,7 +271,12 @@ export async function scanServer(options: {
           [server.id, row.path],
         );
         await query('delete from file_contents where server_id = $1 and path = $2', [server.id, row.path]);
-        await recordUpdateEvent(server.id, 'deleted', row.path, 'scan', {});
+        // Keep the hash so the explorer can pair a delete with a later add and
+        // report it as a rename/move instead of two unrelated events.
+        await recordUpdateEvent(server.id, 'deleted', row.path, 'scan', {
+          sha256: row.sha256,
+          size: Number(row.size_bytes ?? 0),
+        });
         await query('delete from command_metadata where server_id = $1 and path = $2', [server.id, row.path]);
         deleted += 1;
       }
@@ -390,15 +395,17 @@ async function detectConflict(
 export async function refreshCommandMetadata(
   serverId: string,
   changedPaths: string[],
+  options: { limit?: number } = {},
 ): Promise<{ cases: number; functions: number }> {
+  const limit = Math.min(Math.max(options.limit ?? 400, 50), 4000);
   const candidates = await query<{ path: string; content: string; sha256: string }>(
     `select path, content, sha256 from file_contents where server_id = $1
       and (path like '%.js' or path like '%.cjs' or path like '%.mjs' or path like '%.ts')
-      order by length(content) desc limit 500`,
-    [serverId],
+      order by length(content) desc limit $2`,
+    [serverId, Math.max(limit * 2, 800)],
   );
   const wanted = changedPaths.length ? new Set(changedPaths) : null;
-  const rows = wanted ? candidates.filter((row) => wanted.has(row.path)) : candidates.slice(0, 400);
+  const rows = wanted ? candidates.filter((row) => wanted.has(row.path)) : candidates.slice(0, limit);
 
   let cases = 0;
   let functions = 0;

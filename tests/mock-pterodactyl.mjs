@@ -19,6 +19,8 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
   const signed = new Map();
   const powers = [];
   const writes = [];
+  /** Files whose `/files/contents` answers 200 with an empty body (the reported bug). */
+  const emptyBodies = new Set();
   /** Every request the client made, so tests can prove the verb and the path. */
   const calls = [];
   /** Mirrors the real panel: the container state follows the last power signal. */
@@ -269,8 +271,13 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
         return send(200, { data: list(url.searchParams.get('directory') ?? '/').map((attributes) => ({ attributes })) });
       }
       if (op === '/contents') {
-        const file = files.get(url.searchParams.get('file'));
+        const requested = url.searchParams.get('file');
+        const file = files.get(requested);
         if (!file) return notFound();
+        // A real panel does this when the subuser lost file.read, or when a proxy
+        // drops the body: 200, no bytes, but the directory listing still shows the
+        // file's size.
+        if (emptyBodies.has(requested)) return send(200, '', 'text/plain');
         return send(200, file.content, 'text/plain');
       }
       if (op === '/write') {
@@ -430,6 +437,11 @@ export function createMockPanel({ apiKey = 'test-key', identifier = 'abc12345', 
     },
     read(path) {
       return files.get(path)?.content.toString('utf8') ?? null;
+    },
+    /** Make `/files/contents` return an empty 200 body for this path. */
+    breakBody(path, broken = true) {
+      if (broken) emptyBodies.add(path);
+      else emptyBodies.delete(path);
     },
   };
 }

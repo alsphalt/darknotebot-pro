@@ -71,6 +71,23 @@ export async function fetchRemoteFile(
   const maxBytes = options.maxBytes ?? editorLimitFor(server);
   const content = await client.readFile(target, maxBytes);
   const stat = options.withStat === false ? null : await remoteStat(client, target);
+
+  /**
+   * A 200 with an empty body is how a missing `file.read` permission, an
+   * interrupted transfer or a proxy used to reach the editor: the tab showed the
+   * real filename and size (from the directory listing) and a completely blank
+   * surface. Refuse it here so the UI reports a read failure instead of offering
+   * an empty buffer to save.
+   */
+  if (stat && Number(stat.size) > 0 && content.length === 0) {
+    throw new ApiError(
+      `${target} is ${stat.size} bytes on the panel but its contents came back empty. ` +
+        'Nothing was opened. Check that the Client API key has the file.read permission and try again.',
+      502,
+      'empty_body',
+    );
+  }
+
   return {
     path: target,
     content,
@@ -394,6 +411,8 @@ export async function writeProductionFile(options: {
   userId?: string | null;
   deploymentId?: string | null;
   skipBackup?: boolean;
+  /** Internal restore paths only: allow an intentionally empty version to win. */
+  allowEmpty?: boolean;
 }): Promise<WriteResult> {
   const { server } = options;
   const target = confineToRoot(server.projectRoot, options.path);
@@ -413,6 +432,21 @@ export async function writeProductionFile(options: {
     else throw error;
   }
   const currentHash = current === '' ? null : sha256(current);
+
+  /**
+   * Server-side twin of the editor's write guard. A blank editor surface must
+   * never be able to erase a real production file, even if a client-side check
+   * is bypassed or a draft was stored empty. Restores/rollbacks opt in
+   * explicitly because replaying a genuinely empty version is legitimate.
+   */
+  if (!options.allowEmpty && options.content.length === 0 && current.length > 0) {
+    throw new ApiError(
+      `Refusing to overwrite ${target} with an empty buffer: production holds ` +
+        `${Buffer.byteLength(current, 'utf8')} bytes. Reload the file and edit the real source.`,
+      422,
+      'empty_write_blocked',
+    );
+  }
 
   if (options.expectedHash && currentHash !== options.expectedHash) {
     throw new ApiError(

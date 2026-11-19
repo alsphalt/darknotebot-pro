@@ -381,13 +381,96 @@ create table if not exists server_settings (
 );
 
 -- ---------------------------------------------------------------------------
+-- 20. Error intelligence
+-- ---------------------------------------------------------------------------
+create table if not exists error_events (
+  id               text primary key,
+  server_id        text references connected_servers(id) on delete set null,
+  user_id          text,
+  fingerprint      text not null,
+  source           text not null,            -- api | client | scan | deploy | monitor | assistant | websocket
+  component        text not null,            -- route, file or subsystem
+  severity         text not null default 'moderate',  -- critical | moderate | minor
+  title            text not null,
+  code             text not null,
+  message          text not null,
+  status_code      integer,
+  endpoint         text,
+  method           text,
+  file_path        text,
+  line_number      integer,
+  function_name    text,
+  root_cause       text,
+  explanation      text,
+  remedy           text,
+  context          jsonb not null default '{}'::jsonb,
+  occurrence_count integer not null default 1,
+  first_seen_at    timestamptz not null default now(),
+  last_seen_at     timestamptz not null default now(),
+  resolved_at      timestamptz,
+  resolved_by      text,
+  resolution_note  text
+);
+create unique index if not exists error_events_active_fingerprint on error_events (fingerprint) where resolved_at is null;
+create index if not exists error_events_seen_idx on error_events (last_seen_at desc);
+create index if not exists error_events_server_idx on error_events (server_id, last_seen_at desc);
+
+-- ---------------------------------------------------------------------------
+-- 21. BIGBROTHER conversations, memory and tutorials
+-- ---------------------------------------------------------------------------
+create table if not exists ai_conversations (
+  id            text primary key,
+  user_id       text not null references admin_users(id) on delete cascade,
+  title         text not null default 'New conversation',
+  context       jsonb not null default '{}'::jsonb,
+  message_count integer not null default 0,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists ai_conversations_user_idx on ai_conversations (user_id, updated_at desc);
+
+create table if not exists ai_messages (
+  id              text primary key,
+  conversation_id text not null references ai_conversations(id) on delete cascade,
+  role            text not null,            -- user | assistant
+  content         text not null,
+  blocks          jsonb,
+  provider        text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists ai_messages_conversation_idx on ai_messages (conversation_id, created_at asc);
+
+create table if not exists ai_tutorials (
+  id          text primary key,
+  slug        text not null unique,
+  title       text not null,
+  summary     text,
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create table if not exists ai_tutorial_steps (
+  id              text primary key,
+  tutorial_id     text not null references ai_tutorials(id) on delete cascade,
+  position        integer not null,
+  title           text not null,
+  body            text not null,
+  image_path      text,
+  image_alt       text,
+  image_width     integer,
+  image_height    integer,
+  created_at      timestamptz not null default now()
+);
+create index if not exists ai_tutorial_steps_order on ai_tutorial_steps (tutorial_id, position asc);
+
 -- 24. ERROR INTELLIGENCE
 -- Every captured failure, its diagnosis and its repair state. One row per
 -- distinct problem (fingerprint), with an occurrence counter for repeats.
 -- server_id is nullable: API/frontend/auth failures can happen before a server
 -- is selected and are still worth explaining.
 -- ---------------------------------------------------------------------------
-create table if not exists error_events (
+create table if not exists error_intel_events (
   id              text primary key,
   server_id       text references connected_servers(id) on delete cascade,
   user_id         text,
@@ -419,11 +502,11 @@ create table if not exists error_events (
   resolution_note text,
   updated_at      timestamptz not null default now()
 );
-create unique index if not exists error_events_fingerprint_key on error_events (fingerprint);
-create index if not exists error_events_status_idx on error_events (status, last_seen_at desc);
-create index if not exists error_events_server_idx on error_events (server_id, last_seen_at desc);
-create index if not exists error_events_source_idx on error_events (source, last_seen_at desc);
-create index if not exists error_events_severity_idx on error_events (severity, last_seen_at desc);
+create unique index if not exists error_intel_events_fingerprint_key on error_intel_events (fingerprint);
+create index if not exists error_intel_events_status_idx on error_intel_events (status, last_seen_at desc);
+create index if not exists error_intel_events_server_idx on error_intel_events (server_id, last_seen_at desc);
+create index if not exists error_intel_events_source_idx on error_intel_events (source, last_seen_at desc);
+create index if not exists error_intel_events_severity_idx on error_intel_events (severity, last_seen_at desc);
 
 -- ---------------------------------------------------------------------------
 -- 25. BIGBROTHER AI — conversations, memory, tutorials and assets

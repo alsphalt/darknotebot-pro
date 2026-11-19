@@ -60,15 +60,28 @@ export const NAV_PAGES: NavPage[] = [
   {
     id: 'files',
     href: '/files',
-    title: 'File Manager (Project Explorer)',
-    summary: 'Browse, create, rename, move, copy, delete, upload and ZIP-import production files.',
-    keywords: ['files', 'file manager', 'project explorer', 'explorer', 'folder', 'plugins', 'upload', 'download zip', 'directory', 'path'],
+    title: 'File Manager',
+    summary: 'Browse and change production files directly: create, rename, move, copy, delete, upload and import a ZIP.',
+    keywords: ['files', 'file manager', 'upload', 'zip import', 'rename', 'delete file', 'new folder', 'path'],
     details: [
-      'Opens at ?path=/plugins (or any folder) so a folder can be linked directly.',
-      'Protected paths are blocked from reading and writing by policy.',
-      'ZIP import rejects traversal entries and inspects contents before writing.',
+      'Shows one directory at a time, with the current path kept in the URL (?path=/lib).',
+      'Protected paths (sessions, .env, credentials) are refused for read and write by policy.',
+      'ZIP import rejects traversal entries and inspects the archive before writing.',
     ],
-    commonTasks: ['Open the plugins folder', 'Upload a file', 'Rename or move a file'],
+    commonTasks: ['Upload a plugin file', 'Rename or move a file', 'Create a folder'],
+  },
+  {
+    id: 'explorer',
+    href: '/explorer',
+    title: 'Project Explorer',
+    summary: 'The intelligent view of the project: verified entry point, plugins, cases, functions, configuration and dependency health.',
+    keywords: ['project explorer', 'explorer', 'plugins', 'plugin', 'structure', 'entry point', 'main file', 'dependencies', 'package.json', 'categories'],
+    details: [
+      'Categories: Plugins, package.json & dependencies, Main file / entry point, Cases / commands, Functions / helpers, Configuration / settings, Database / models / storage.',
+      'The entry point is verified against the filesystem, not inferred from a name.',
+      'Dependency freshness and search coverage are opt-in checks, so a page load never triggers a long scan.',
+    ],
+    commonTasks: ['Find all plugins', 'See the real main file', 'Inspect cases and functions'],
   },
   {
     id: 'editor',
@@ -337,6 +350,12 @@ export const BUILTIN_TUTORIALS: Tutorial[] = [
         body: 'Ask “where is my main.js file”. The answer lists real paths from the file index with the matching line, not a guess.',
       },
       {
+        title: 'Confirm it in Project Explorer',
+        body: 'The “Main file / entry point” category shows the file the panel actually starts, verified against the filesystem.',
+        link: '/explorer',
+        linkLabel: 'Open Main file / entry point',
+      },
+      {
         title: 'Open it in the Code Editor',
         body: 'Select the result. The editor opens /editor?path=/…&line=… so the cursor lands on the matched line.',
         link: '/editor',
@@ -409,7 +428,7 @@ export const BUILTIN_TUTORIALS: Tutorial[] = [
       {
         title: 'Open the file',
         body: 'Use Project Explorer or ask BIGBROTHER to find it. The editor loads production content and records its hash.',
-        link: '/files',
+        link: '/explorer',
         linkLabel: 'Open Project Explorer',
       },
       {
@@ -458,15 +477,15 @@ export const BUILTIN_TUTORIALS: Tutorial[] = [
     steps: [
       {
         title: 'Open Project Explorer',
-        body: 'The file manager shows the real server tree. Use the folder breadcrumb to navigate; the URL keeps the current path so it can be linked directly.',
-        link: '/files',
+        body: 'Project Explorer groups the real project into categories, so plugins are visible without guessing a path.',
+        link: '/explorer',
         linkLabel: 'Open Project Explorer',
       },
       {
-        title: 'Open the plugins folder',
-        body: 'Ask BIGBROTHER “find all plugins” first: it searches the index and returns the actual plugin paths. If no plugins folder exists, the answer says so instead of inventing one.',
-        link: '/files?path=%2Fplugins',
-        linkLabel: 'Open /plugins',
+        title: 'Open the Plugins category',
+        body: 'Choose Plugins to list every plugin module with its files, commands and dependencies. If no plugin directory was found, the category says so rather than showing an empty claim. You can also open the raw folder in File Manager.',
+        link: '/explorer',
+        linkLabel: 'Open the Plugins category',
       },
       {
         title: 'Inspect or edit a plugin',

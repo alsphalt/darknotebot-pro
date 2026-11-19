@@ -152,7 +152,7 @@ async function migrate(client: DbClient): Promise<void> {
     await client.query(`alter table editor_drafts add column if not exists chunk_count integer`);
   }
 
-  // v3: Error Intelligence (error_events) and BIGBROTHER (conversations,
+  // v3: Error Intelligence (error_intel_events) and BIGBROTHER (conversations,
   // messages, memory, assets, tutorials, usage). schema.sql is idempotent, so
   // the table block above already creates them; this block only records the
   // migration marker and keeps the version list consistent.

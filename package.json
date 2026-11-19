@@ -10,7 +10,13 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/register-hooks.mjs --experimental-strip-types --test tests/*.test.ts",
     "db:check": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-check.ts",
-    "create-admin": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/create-admin.ts"
+    "create-admin": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/create-admin.ts",
+    "monaco:copy": "node scripts/copy-monaco.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "postinstall": "node scripts/copy-monaco.mjs",
+    "predev": "node scripts/copy-monaco.mjs",
+    "prebuild": "node scripts/copy-monaco.mjs",
+    "prestart": "node scripts/copy-monaco.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",

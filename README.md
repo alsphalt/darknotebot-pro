@@ -19,6 +19,7 @@ files.
 | **Overview / Live Monitor** | Live container state, CPU/RAM/disk, uptime and restart count from the panel; Start/Stop/Restart over `POST /power`; WhatsApp verdict from the bot process's own status file or its own connection events |
 | **Server Discovery** | Recursive walk of the actual filesystem → file index, SHA-256, AST-derived commands |
 | **File Manager** | Browse, create, rename, move, copy, delete, upload, ZIP import with path-traversal rejection, ZIP download |
+| **Project Explorer** | Deep discovery of plugins, cases, functions, config, dependencies and the real entry point, plus project-wide symbol/code search and safe file management |
 | **Code Editor** | Monaco, multi-tab, chunked load/save for multi-megabyte files, server-side drafts, validate → diff → deploy |
 | **Case Manager** | Every `switch` case parsed with an AST, edit/duplicate/delete with structural checks |
 | **Global Search** | Text, regex (ReDoS-guarded) and AST modes over indexed content, optional live re-verification |
@@ -27,7 +28,8 @@ files.
 | **Backups & Versions** | Private content-addressed store + panel backups |
 | **Download Center** | Serves freshly-read production bytes with a verified SHA-256 |
 | **Terminal & Logs** | One persistent authenticated console websocket per server, relayed over SSE; command sending gated behind confirmation |
-| **Admin Settings** | Accounts, roles, capability probe, security posture |
+| **Admin Settings** | Accounts, roles, capability probe, security posture, install status |
+| **Installable app (PWA)** | Manifest, service worker and install prompts for a standalone window on desktop, Android and iOS, with an offline fallback page |
 
 ---
 
@@ -152,6 +154,51 @@ real operations, including a scratch write that is read back and deleted.
 
 ---
 
+## Code editor runtime
+
+The editor has to show the production bytes, so three things are deliberate:
+
+| Concern | Implementation |
+|---|---|
+| Component binding | `@monaco-editor/react` is imported as `mod.Editor`, not as the module namespace. A dynamic import of the namespace object is not a React component and renders no surface at all while the rest of the page works. |
+| Monaco hosting | Served from this origin at `/monaco/vs`. `scripts/copy-monaco.mjs` copies `node_modules/monaco-editor/min/vs` into `public/monaco` on `postinstall`, `predev` and `prebuild` (git-ignored, ~14 MB). `src/lib/editor/monaco.ts` probes that path first and only falls back to the jsDelivr CDN if the local copy is missing; if neither answers it switches to the plain-text surface instead of showing an empty box. |
+| Editor height | Measured with a `ResizeObserver` and passed to Monaco as an explicit pixel height. Percentage heights inside an auto-height panel collapse to `0 px`, which renders a working editor with no visible area. |
+| Content proof | `GET /api/files/content?mode=full` returns the body plus `sha256`/`totalChars`; the page refuses to open a tab whose buffer length differs from `totalChars` or is empty while production reports bytes. The header prints the live character count so the buffer is visible as a number, not just as pixels. |
+
+Safety before any write: an empty (or whitespace-only) buffer cannot be saved or
+deployed over a file that has bytes on production, the panel response is checked
+for a 200-with-empty-body, non-UTF-8 files are refused rather than decoded lossily,
+and a deploy still re-reads production and compares SHA-256 before the restart.
+
+## Project Explorer
+
+`/explorer` answers "where is this in the bot?" without making you know the path.
+It is built entirely from the indexed project — the same rows the File Manager and
+Global Search use — plus a real parse of the source:
+
+| Category | How it is discovered |
+|---|---|
+| **Plugins** | Any file inside a `plugins`/`modules`/`extensions`/`commands`-style directory (whole segment match), grouped by its own directory; single-file plugins (`/plugins/menu.js`) are detected too. Each group shows its files, command count, function count, the packages it imports and which files load it. |
+| **package.json** | The shallowest manifest in the project. Declared ranges, scripts, which packages the code actually imports, which declared packages are missing from `node_modules`, and which imports are undeclared. Outdated versions are **not** guessed: there is no registry lookup, so the UI says so. |
+| **Entry point** | The file in the panel's `current_startup_command`, verified against the index; then `package.json` `main`, then the `scripts.start` command, then conventional names that actually exist, then highest import in-degree. Every candidate is listed with its score and evidence, and a startup file that does not exist is called out. |
+| **Cases / commands** | AST walk of every parsed JS/TS file (`command_metadata`), grouped by file with exact lines and aliases. Files that look like handlers but produced no cases are listed as *unparsed* instead of being hidden. |
+| **Functions / helpers** | Function declarations, arrow constants, class methods and exports per file with line numbers. |
+| **Configuration** | Config/settings filenames, `.env` templates and config folders. Only file names and **key names** are shown — `.env` and other credential files are listed as protected and never read. |
+| **Database / models / storage** | `.sql`, `.prisma`, model/connection code, plus `database/`, `data/`, `storage/` contents. Database files and JSON/CSV records are marked protected: downloadable, never editable or deletable from the explorer. |
+
+Global search merges three sources: symbol matches (case/function names), file and
+folder names, and line-level code matches, each linking straight into the editor at
+the right line.
+
+**Rescan** (`POST /api/explorer/scan`) walks the panel again, re-reads changed
+content, re-parses symbols and reports added / changed / deleted paths. A delete
+and an add with the same SHA-256 are reported as a rename. A scan never edits a
+project file.
+
+File relationships come from a real import graph: relative `require`/`import`
+specifiers are resolved through `.js/.cjs/.mjs/.json/index.*` candidates, so a file
+shows what it imports, what imports it, and which references are broken.
+
 ## Large files
 
 The old build refused anything above 2 MB. That limit came from a 512 KB database default multiplied
@@ -178,6 +225,41 @@ How a large edit flows:
 
 If a file genuinely exceeds the limit, the API answers **413** with the actual size, the configured
 limit and the ceiling — it does not silently truncate.
+
+---
+
+## Install as an app (PWA)
+
+The console is installable. There is no build plugin and no extra dependency: the manifest, the
+worker and the icon set are plain files, and the install UI is one client component.
+
+| Piece | File | Notes |
+|---|---|---|
+| Manifest | `public/manifest.webmanifest` | `standalone`, scope `/`, theme `#05060a`, three shortcuts (Monitor, Console, Files) |
+| Service worker | `public/sw.js` | Served from the root, so its scope covers the whole app |
+| Icons | `public/icons/*`, `src/app/icon.png`, `src/app/apple-icon.png` | Generated by `npm run icons` (SDF renderer, no image libraries) |
+| Install UI | `src/components/pwa.tsx` | `beforeinstallprompt`, iOS instructions sheet, update toast, offline strip |
+| Offline fallback | `src/app/offline/page.tsx` | Static, outside the authenticated group, precached at install |
+
+**What the worker is allowed to cache.** The console is an authenticated admin surface, so the policy
+is deliberately narrow:
+
+- `/_next/static/*`, `/icons/*` and the manifest: stale-while-revalidate, so the shell boots on a poor
+  connection.
+- HTML navigations: **network-first and never written to a cache.** A signed-in page can't be replayed
+  from disk to the next person using the device.
+- `/api/*`: never intercepted at all — requests keep their cookies, credentials and cache headers.
+- When a navigation fails, `/offline` is served instead (its hashed chunks are precached too).
+
+**Updating a deployment.** `sw.js` is served with `must-revalidate` and the new worker does not skip
+waiting on its own. When a deploy lands, the open tab shows a "new version is ready" toast; approving it
+sends `SKIP_WAITING` and reloads once. Bump `CACHE_VERSION` in `public/sw.js` whenever the cached surface
+changes.
+
+**Honest limits.** Install prompts are browser-initiated: Chrome and Edge fire `beforeinstallprompt`
+(HTTPS or localhost only), Safari on iOS never does and gets the manual *Share → Add to Home Screen*
+instructions instead, and Firefox desktop has no install entry at all. Nothing here caches remote server
+content — offline you get the shell and the offline page, not a stale dashboard.
 
 ---
 

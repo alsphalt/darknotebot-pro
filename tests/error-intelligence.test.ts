@@ -242,7 +242,7 @@ test('repair proposals respect authority and never write on propose', async () =
     /permission|authorisation|does not include/,
   );
 
-  const stored = await queryOne<{ occurrences: number }>('select occurrences from error_events where id = $1', [error!.id]);
+  const stored = await queryOne<{ occurrences: number }>('select occurrences from error_intel_events where id = $1', [error!.id]);
   assert.equal(Number(stored?.occurrences), 1);
 });
 

@@ -99,13 +99,13 @@ export async function recordError(input: RawErrorInput): Promise<ErrorEvent | nu
     const at = input.at ?? new Date().toISOString();
 
     const rows = await query<Row>(
-      `insert into error_events
+      `insert into error_intel_events
         (id, server_id, user_id, fingerprint, title, code, message, source, severity, status,
          occurrences, first_seen_at, last_seen_at, file_path, line_number, column_number, function_name,
          endpoint, http_method, http_status, root_cause, why, recommendation, evidence, context, repair)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',1,$10::timestamptz,$10::timestamptz,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22::jsonb,$23::jsonb)
        on conflict (fingerprint) do update set
-         occurrences = error_events.occurrences + 1,
+         occurrences = error_intel_events.occurrences + 1,
          last_seen_at = excluded.last_seen_at,
          updated_at = now(),
          title = excluded.title,
@@ -113,13 +113,13 @@ export async function recordError(input: RawErrorInput): Promise<ErrorEvent | nu
          message = excluded.message,
          severity = excluded.severity,
          source = excluded.source,
-         file_path = coalesce(excluded.file_path, error_events.file_path),
-         line_number = coalesce(excluded.line_number, error_events.line_number),
-         column_number = coalesce(excluded.column_number, error_events.column_number),
-         function_name = coalesce(excluded.function_name, error_events.function_name),
-         endpoint = coalesce(excluded.endpoint, error_events.endpoint),
-         http_method = coalesce(excluded.http_method, error_events.http_method),
-         http_status = coalesce(excluded.http_status, error_events.http_status),
+         file_path = coalesce(excluded.file_path, error_intel_events.file_path),
+         line_number = coalesce(excluded.line_number, error_intel_events.line_number),
+         column_number = coalesce(excluded.column_number, error_intel_events.column_number),
+         function_name = coalesce(excluded.function_name, error_intel_events.function_name),
+         endpoint = coalesce(excluded.endpoint, error_intel_events.endpoint),
+         http_method = coalesce(excluded.http_method, error_intel_events.http_method),
+         http_status = coalesce(excluded.http_status, error_intel_events.http_status),
          root_cause = excluded.root_cause,
          why = excluded.why,
          recommendation = excluded.recommendation,
@@ -233,14 +233,14 @@ export async function listErrors(filters: ErrorFilters = {}): Promise<{ errors: 
 
   const [rows, totalRow] = await Promise.all([
     query<Row>(
-      `select * from error_events ${clause}
+      `select * from error_intel_events ${clause}
         order by case severity when 'critical' then 0 when 'moderate' then 1 else 2 end,
                  last_seen_at desc
         limit $${params.length - 1} offset $${params.length}`,
       params,
     ),
     queryOne<{ count: string | number }>(
-      `select count(*)::int as count from error_events ${clause}`,
+      `select count(*)::int as count from error_intel_events ${clause}`,
       params.slice(0, -2),
     ),
   ]);
@@ -249,7 +249,7 @@ export async function listErrors(filters: ErrorFilters = {}): Promise<{ errors: 
 }
 
 export async function getError(id: string): Promise<ErrorEvent | null> {
-  const row = await queryOne<Row>('select * from error_events where id = $1', [id]);
+  const row = await queryOne<Row>('select * from error_intel_events where id = $1', [id]);
   return row ? mapRow(row) : null;
 }
 
@@ -282,11 +282,11 @@ export async function errorStats(serverId?: string | null, serverIds?: string[])
          count(*) filter (where status = 'active' and severity = 'minor')::int as minor_open,
          count(*) filter (where last_seen_at > now() - interval '24 hours')::int as last24,
          count(*)::int as total
-       from error_events ${filter}`,
+       from error_intel_events ${filter}`,
       params,
     ),
     query<{ source: string; count: string | number }>(
-      `select source, count(*)::int as count from error_events
+      `select source, count(*)::int as count from error_intel_events
         ${where.length ? `${filter} and status = 'active'` : "where status = 'active'"}
         group by source order by count desc limit 12`,
       params,
@@ -312,7 +312,7 @@ export async function setErrorStatus(
   note?: string,
 ): Promise<ErrorEvent | null> {
   await query(
-    `update error_events set
+    `update error_intel_events set
        status = $2,
        resolved_at = case when $2 = 'resolved' then now() else null end,
        resolved_by = case when $2 = 'resolved' then $3 else null end,
@@ -325,12 +325,12 @@ export async function setErrorStatus(
 }
 
 export async function saveRepair(id: string, repair: RepairRecord): Promise<void> {
-  await query('update error_events set repair = $2::jsonb, updated_at = now() where id = $1', [id, jsonb(repair)]);
+  await query('update error_intel_events set repair = $2::jsonb, updated_at = now() where id = $1', [id, jsonb(repair)]);
 }
 
 export async function unresolvedCriticalCount(serverId?: string | null): Promise<number> {
   const row = await queryOne<{ count: string | number }>(
-    `select count(*)::int as count from error_events
+    `select count(*)::int as count from error_intel_events
       where status = 'active' and severity in ('critical','moderate')
         ${serverId ? 'and server_id = $1' : ''}`,
     serverId ? [serverId] : [],

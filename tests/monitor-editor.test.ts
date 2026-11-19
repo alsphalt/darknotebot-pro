@@ -240,6 +240,104 @@ test('the editor limit is per server and clamped by the process ceiling', async 
   assert.equal(editorLimitFor(clamped!), env.maxEditorBytes, 'a per-server limit can never exceed the ceiling');
 });
 
+test('BIGBRO.js (391 KB) is returned byte-for-byte, exactly as the panel holds it', async () => {
+  const server = await getServer(serverId);
+  const source = largeSource(391 * 1024);
+  panel.externalEdit('/BIGBRO.js', source);
+
+  const snapshot = await fetchRemoteFile(server!, '/BIGBRO.js');
+  assert.equal(snapshot.content, source, 'every byte of the source must reach the editor');
+  assert.equal(snapshot.content.length, source.length);
+  assert.equal(snapshot.sha256, sha256(source));
+  assert.ok(
+    snapshot.sizeBytes > 390 * 1024 && snapshot.sizeBytes < 400 * 1024,
+    `expected ~391 KB, got ${snapshot.sizeBytes} bytes`,
+  );
+  // The size the editor header prints comes from these bytes, so it must agree
+  // with the file content rather than with a stale index row.
+  assert.equal(snapshot.sizeBytes, Buffer.byteLength(source, 'utf8'));
+});
+
+test('a 200 with an empty body is an error, never a blank editor', async () => {
+  const server = await getServer(serverId);
+  panel.breakBody('/BIGBRO.js', true);
+  try {
+    await assert.rejects(
+      () => fetchRemoteFile(server!, '/BIGBRO.js'),
+      (error: { code?: string; message?: string }) => {
+        assert.equal(error.code, 'empty_body');
+        assert.match(String(error.message), /came back empty/);
+        return true;
+      },
+    );
+  } finally {
+    panel.breakBody('/BIGBRO.js', false);
+  }
+
+  const recovered = await fetchRemoteFile(server!, '/BIGBRO.js');
+  assert.ok(recovered.content.length > 390 * 1024, 'the file must open again once the body returns');
+});
+
+test('a non-UTF-8 file is refused instead of being silently mangled', async () => {
+  const server = await getServer(serverId);
+  // 0xE9 is Latin-1 "é" and is not a valid UTF-8 sequence on its own.
+  panel.files.set('/legacy.js', {
+    content: Buffer.from([0x2f, 0x2f, 0x20, 0xe9, 0x0a]),
+    mtime: new Date().toISOString(),
+  });
+  await assert.rejects(
+    () => fetchRemoteFile(server!, '/legacy.js'),
+    (error: { code?: string }) => error.code === 'not_utf8_text',
+  );
+});
+
+test('an empty buffer is refused server-side before it can erase a file', async () => {
+  const server = await getServer(serverId);
+  const before = panel.read('/index.js');
+  assert.ok(before && before.length > 0);
+
+  await assert.rejects(
+    () =>
+      writeProductionFile({
+        server: server!,
+        path: '/index.js',
+        content: '',
+        expectedHash: sha256(before!),
+        userId: principal.id,
+        note: 'empty write test',
+      }),
+    (error: { code?: string }) => error.code === 'empty_write_blocked',
+  );
+
+  assert.equal(panel.read('/index.js'), before, 'production must still hold the original bytes');
+});
+
+test('deploying the 391 KB file preserves every byte and stays restorable', async () => {
+  const server = await getServer(serverId);
+  const before = await fetchRemoteFile(server!, '/BIGBRO.js');
+  const edited = `${before.content}
+// edited from the code editor\n`;
+
+  const result = await writeProductionFile({
+    server: server!,
+    path: '/BIGBRO.js',
+    content: edited,
+    expectedHash: before.sha256,
+    userId: principal.id,
+    note: 'editor deploy test',
+  });
+
+  assert.equal(result.hash, sha256(edited));
+  assert.equal(panel.read('/BIGBRO.js'), edited, 'production must hold the complete edited file');
+  assert.ok(panel.read('/BIGBRO.js')!.length > 390 * 1024, 'the deploy must not truncate the file');
+
+  const versions = await listVersions(serverId, { path: '/BIGBRO.js' });
+  const previous = versions.find((version) => version.sha256 === before.sha256);
+  assert.ok(previous, 'the pre-deploy content must be backed up');
+  const restored = await readVersionText(await getVersion(serverId, previous!.id));
+  assert.equal(restored, before.content, 'the backup must be byte-identical to the original');
+});
+
 test.after(async () => {
   detachConsole(serverId);
   await panel.stop();

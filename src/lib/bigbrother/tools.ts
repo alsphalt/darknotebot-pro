@@ -5,6 +5,7 @@ import { consoleBuffer } from '../services/console';
 import { listErrors, errorStats } from '../errors/store';
 import type { ErrorEvent } from '../errors/types';
 import { summarizeJavaScript } from '../search/ast';
+import { explorerSearch } from '../services/explorer';
 
 /**
  * Tools over DARKNOTE's real data.
@@ -54,40 +55,41 @@ function snippetFor(content: string, line: number, radius = 1): string {
     .join('\n');
 }
 
-export async function searchProject(serverId: string, rawTerm: string, limit = 8): Promise<ProjectSearchResult> {
+export async function searchProject(
+  server: ServerRecord,
+  rawTerm: string,
+  limit = 8,
+): Promise<ProjectSearchResult> {
   const term = rawTerm.trim();
-  const notes: string[] = [];
   if (!term) {
     return { hits: [], notes: ['No search term was extracted from the question.'], snapshotAt: null, indexedFiles: 0 };
   }
 
-  const [indexCount, snapshot] = await Promise.all([
+  const [indexCount, result] = await Promise.all([
     queryOne<{ count: string | number }>(
       `select count(*)::int as count from file_indexes
         where server_id = $1 and deleted_at is null and is_directory = false`,
-      [serverId],
+      [server.id],
     ),
-    queryOne<{ last: string | null }>(
-      `select max(fetched_at) as last from file_contents where server_id = $1`,
-      [serverId],
-    ),
+    // The Explorer search is the same engine the Project Explorer uses: symbols,
+    // file names and indexed code hits with exact line numbers.
+    explorerSearch(server, term, { limit: 200 }),
   ]);
+
   const indexedFiles = Number(indexCount?.count ?? 0);
   if (indexedFiles === 0) {
     return {
       hits: [],
       notes: [
-        'No files are indexed for this server yet, so there is nothing to search. Run Server Discovery first — until then any file path would be a guess.',
+        'No files are indexed for this server yet, so there is nothing to search. Run Server Discovery (or Project Explorer → Scan) first — until then any file path would be a guess.',
       ],
       snapshotAt: null,
       indexedFiles: 0,
     };
   }
 
-  const like = `%${term.toLowerCase()}%`;
   const hits: ProjectHit[] = [];
   const seen = new Set<string>();
-
   const push = (hit: ProjectHit) => {
     const key = `${hit.path}:${hit.line ?? 0}:${hit.kind}:${hit.label ?? ''}`;
     if (seen.has(key)) return;
@@ -95,93 +97,70 @@ export async function searchProject(serverId: string, rawTerm: string, limit = 8
     hits.push(hit);
   };
 
-  // 1. Commands and functions from the AST index.
-  const commands = await query<{
-    path: string; kind: string; name: string; line_start: number; signature: string | null; aliases: unknown;
-  }>(
-    `select path, kind, name, line_start, signature, aliases from command_metadata
-      where server_id = $1
-        and (lower(name) like $2 or lower(coalesce(signature,'')) like $2 or lower(aliases::text) like $2)
-      order by case when kind = 'case' then 0 when kind = 'case_alias' then 1 else 2 end, name asc
-      limit $3`,
-    [serverId, like, limit],
-  );
-  for (const row of commands) {
-    const aliases = parseJsonb<string[]>(row.aliases, []);
+  for (const symbol of result.symbols) {
     push({
-      path: row.path,
-      fileName: row.path.split('/').pop() ?? row.path,
-      line: Number(row.line_start) || null,
-      label: row.name,
-      kind: row.kind.startsWith('case') ? 'case' : 'function',
-      snippet: `${row.kind === 'case_alias' ? 'alias' : row.kind} “${row.name}”${aliases.length ? ` · aliases: ${aliases.join(', ')}` : ''}`,
-      openHref: editorHref(row.path, Number(row.line_start) || null),
-      explorerHref: explorerHref(row.path),
+      path: symbol.path,
+      fileName: symbol.path.split('/').pop() ?? symbol.path,
+      line: symbol.line || null,
+      label: symbol.name,
+      kind: symbol.kind === 'case' ? 'case' : 'function',
+      snippet: symbol.detail ?? `${symbol.kind} “${symbol.name}”`,
+      openHref: editorHref(symbol.path, symbol.line || null),
+      explorerHref: explorerHref(symbol.path),
       matchCount: 1,
     });
   }
 
-  // 2. File names and paths.
-  const files = await query<{ path: string; name: string; size_bytes: string | number }>(
-    `select path, name, size_bytes from file_indexes
-      where server_id = $1 and deleted_at is null and is_directory = false
-        and (lower(name) like $2 or lower(path) like $2)
-      order by length(path) asc limit $3`,
-    [serverId, like, limit],
-  );
-  for (const row of files) {
+  for (const name of result.names) {
+    if (name.isDirectory) continue;
     push({
-      path: row.path,
-      fileName: row.name,
+      path: name.path,
+      fileName: name.name,
       line: null,
       label: null,
       kind: 'file',
-      snippet: `${Number(row.size_bytes)} bytes`,
-      openHref: editorHref(row.path, null),
-      explorerHref: explorerHref(row.path),
+      snippet: null,
+      openHref: editorHref(name.path, null),
+      explorerHref: explorerHref(name.path),
       matchCount: 1,
     });
   }
 
-  // 3. Content matches (indexed snapshot only).
-  if (hits.length < limit) {
-    const contents = await query<{ path: string; content: string; sha256: string }>(
-      `select path, content, sha256 from file_contents
-        where server_id = $1 and position(lower($2) in lower(content)) > 0
-        order by length(content) asc limit $3`,
-      [serverId, term.toLowerCase(), Math.max(1, limit - hits.length)],
-    );
-    for (const row of contents) {
-      const index = row.content.toLowerCase().indexOf(term.toLowerCase());
-      if (index < 0) continue;
-      const line = row.content.slice(0, index).split('\n').length;
-      const summary = /\.(js|cjs|mjs|ts)$/i.test(row.path) ? summarizeJavaScript(row.content) : null;
-      const owner =
-        summary?.cases.find((item) => line >= item.lineStart && line <= item.lineEnd) ??
-        summary?.functions.find((item) => line >= item.lineStart && line <= item.lineEnd);
+  for (const file of result.files) {
+    for (const [index, hit] of file.hits.slice(0, 2).entries()) {
       push({
-        path: row.path,
-        fileName: row.path.split('/').pop() ?? row.path,
-        line,
-        label: owner?.name ?? null,
+        path: file.path,
+        fileName: file.name,
+        line: hit.line,
+        label: null,
         kind: 'content',
-        snippet: snippetFor(row.content, line),
-        openHref: editorHref(row.path, line),
-        explorerHref: explorerHref(row.path),
-        matchCount: 1,
+        snippet: [hit.before, hit.text, hit.after].filter(Boolean).join('\n').trim() || null,
+        openHref: editorHref(file.path, hit.line),
+        explorerHref: explorerHref(file.path),
+        matchCount: Math.max(1, file.matches - index),
       });
     }
   }
 
+  const notes = [...result.notes];
   if (!hits.length) {
     notes.push(
       `Nothing in the index matches “${term}”. The file may be new, outside the project root, or excluded (session folders and credentials are never indexed).`,
     );
-  } else if (snapshot?.last) {
-    notes.push(`Content results come from the indexed snapshot taken ${new Date(snapshot.last).toISOString()}. Editing a file re-reads production.`);
+  } else if (result.snapshotAt) {
+    notes.push(`Code hits come from the indexed snapshot taken ${result.snapshotAt}. Opening a file re-reads production.`);
   }
 
-  return { hits: hits.slice(0, limit), notes, snapshotAt: snapshot?.last ?? null, indexedFiles };
+  // Symbols and file names are stronger answers than a text hit inside a file.
+  const order = { case: 0, function: 1, file: 2, content: 3 } as const;
+  hits.sort((a, b) => order[a.kind] - order[b.kind]);
+
+  return {
+    hits: hits.slice(0, limit),
+    notes: [...new Set(notes)],
+    snapshotAt: result.snapshotAt,
+    indexedFiles,
+  };
 }
 
 export async function pluginFiles(serverId: string): Promise<{ dirs: string[]; files: ProjectHit[] }> {

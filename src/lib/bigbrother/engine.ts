@@ -295,7 +295,7 @@ export async function answer(input: AnswerInput): Promise<AssistantAnswer> {
       };
     }
 
-    const result = await searchProject(server.id, term, 8);
+    const result = await searchProject(server, term, 8);
     if (!result.hits.length) {
       return {
         ...base,
@@ -459,7 +459,7 @@ export async function answer(input: AnswerInput): Promise<AssistantAnswer> {
         ...base,
         text: `I generated the report from stored runtime facts${server ? ` for ${server.name}` : ''}. Nothing in it is estimated; missing sources are named as missing.`,
         blocks: [{ type: 'report', title: 'DARKNOTE report', markdown }],
-        citations: [{ label: 'Sources', detail: 'bot_status, file_indexes, deployments, error_events' }],
+        citations: [{ label: 'Sources', detail: 'bot_status, file_indexes, deployments, error_intel_events' }],
         actions: [
           { label: 'Error Center', href: '/errors', kind: 'navigate' },
           { label: 'Live Monitor', href: '/monitor', kind: 'navigate' },
@@ -617,7 +617,7 @@ export async function answer(input: AnswerInput): Promise<AssistantAnswer> {
         tools,
         callTool: async (name, args) => {
           if (!server) return { error: 'No server is connected.' };
-          if (name === 'search_files') return searchProject(server.id, String(args.query ?? question), 8);
+          if (name === 'search_files') return searchProject(server, String(args.query ?? question), 8);
           if (name === 'list_errors') return errorsForQuestion(server.id, String(args.query ?? question));
           if (name === 'runtime_status') return runtimeFacts(server.id);
           if (name === 'find_page') return findPages(String(args.query ?? question), 3).map((match) => match.page);

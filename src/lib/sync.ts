@@ -314,6 +314,8 @@ export async function resolveConflict(options: {
       expectedHash: remote.sha256,
       note: options.note ?? `Conflict resolved (${resolution})`,
       userId: options.userId,
+      // The chosen side may be an intentionally empty file.
+      allowEmpty: true,
     });
     wroteProduction = true;
     hash = result.hash;

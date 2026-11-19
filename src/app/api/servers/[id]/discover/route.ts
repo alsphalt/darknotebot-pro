@@ -1,6 +1,7 @@
 import { route, ok, ApiError } from '@/lib/api';
 import { assertServerAccess, setConnectionState } from '@/lib/servers/repo';
 import { scanServer, type ScanResult } from '@/lib/services/discovery';
+import { detectEntryPoint } from '@/lib/services/explorer';
 import { query, queryOne } from '@/lib/db';
 import { logActivity } from '@/lib/audit';
 
@@ -12,7 +13,7 @@ interface Params extends Record<string, string> {
   id: string;
 }
 
-const IMPORTANT = ['BIGBRO.js', 'bigbro.js', 'index.js', 'package.json', 'config.json', 'sessionManager.js'];
+
 
 function scanSummary(result: ScanResult) {
   const added = result.files.filter((file) => file.added).map((file) => file.path);
@@ -43,6 +44,11 @@ function scanSummary(result: ScanResult) {
 export const GET = route<Params>({ permission: 'file.read' }, async ({ user, params }) => {
   const server = await assertServerAccess(user, params.id, 'file.read');
 
+  // The entry point comes from the panel startup command, never from a fixed list
+  // of "usual suspects" — a project may start from any file.
+  const entry = await detectEntryPoint(server);
+  const importantPaths = [entry.path, entry.packagePath].filter((value): value is string => Boolean(value));
+
   const [lastScan, counts, important] = await Promise.all([
     queryOne<{
       id: string;
@@ -69,9 +75,9 @@ export const GET = route<Params>({ permission: 'file.read' }, async ({ user, par
     ),
     query<{ path: string; name: string; size_bytes: string | number; sha256: string | null; remote_modified_at: string | null }>(
       `select path, name, size_bytes, sha256, remote_modified_at from file_indexes
-        where server_id = $1 and deleted_at is null and name = any($2::text[])
-        order by name asc`,
-      [server.id, IMPORTANT],
+        where server_id = $1 and deleted_at is null and path = any($2::text[])
+        order by path asc`,
+      [server.id, importantPaths],
     ),
   ]);
 

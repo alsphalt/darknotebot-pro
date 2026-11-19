@@ -205,6 +205,8 @@ export async function restoreVersion(options: {
     expectedHash: null,
     note: options.note ?? `Restored version ${version.version} (${version.sha256.slice(0, 10)}…)`,
     userId: options.userId,
+    // A backup can legitimately be an empty file; replaying it is explicit.
+    allowEmpty: true,
   });
   return { path: result.path, hash: result.hash, version: result.version, backupId: result.backupId };
 }

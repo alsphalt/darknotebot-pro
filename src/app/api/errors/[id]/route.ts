@@ -53,7 +53,7 @@ export const DELETE = route<Params>({ permission: 'console.read' }, async ({ par
     throw new ApiError('Only the owner can delete an error record. Mark it resolved instead.', 403, 'owner_only');
   }
   const { query } = await import('@/lib/db');
-  await query('delete from error_events where id = $1', [params.id]);
+  await query('delete from error_intel_events where id = $1', [params.id]);
   await logActivity({
     user,
     serverId: existing.serverId,

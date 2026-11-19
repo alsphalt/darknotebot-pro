@@ -87,9 +87,17 @@ const SECRET_PATTERNS: RegExp[] = [
   /(^|\/)secrets?\.(json|ya?ml|env)$/i,
 ];
 
+/**
+ * Templates are documentation, not credentials: `.env.example` lists the variable
+ * names an operator must fill in. They stay readable (and editable, see
+ * `isEditable`), while `.env` itself is still refused.
+ */
+const ENV_TEMPLATE = /(^|\/)\.env\.(example|sample|template|dist)$/i;
+
 /** Paths that may never be read into the browser, downloaded or versioned. */
 export function isSecretPath(remotePath: string): boolean {
   const p = normalizeRemotePath(remotePath);
+  if (ENV_TEMPLATE.test(p)) return false;
   return SECRET_PATTERNS.some((re) => re.test(p));
 }
 

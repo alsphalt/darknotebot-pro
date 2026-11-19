@@ -118,18 +118,18 @@ test('intent routing follows the questions the owner actually asks', () => {
 });
 
 test('file search returns real indexed paths, lines and commands', async () => {
-  const main = await searchProject(server.id, 'main.js');
+  const main = await searchProject(server, 'main.js');
   assert.ok(main.hits.some((hit) => hit.path === '/main.js'));
   assert.equal(main.indexedFiles, 3);
 
-  const command = await searchProject(server.id, 'welcome');
+  const command = await searchProject(server, 'welcome');
   const hit = command.hits.find((item) => item.kind === 'case');
   assert.ok(hit, 'the welcome case must be found through command metadata');
   assert.equal(hit?.path, '/plugins/welcome.js');
   assert.equal(hit?.line, 3);
   assert.match(hit?.openHref ?? '', /^\/editor\?path=%2Fplugins%2Fwelcome\.js&line=3$/);
 
-  const missing = await searchProject(server.id, 'nonexistent-module');
+  const missing = await searchProject(server, 'nonexistent-module');
   assert.equal(missing.hits.length, 0);
   assert.match(missing.notes.join(' '), /Nothing in the index matches/);
 });
