@@ -7,6 +7,12 @@ import { PageHeader } from "@/components/app-shell";
 import { useServers, useToast } from "@/components/providers";
 import { InstallAppCard } from "@/components/pwa";
 import { GitHubSettings } from "@/components/projects/github-settings";
+import {
+  AppearanceSettingsPanel,
+  BiometricSettingsPanel,
+  GitHubBindingsPanel,
+  RegistrationSettingsPanel,
+} from "@/components/settings/platform-panels";
 import { Badge, ConfirmDialog, Empty, Panel, Spinner, Status } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost, errorMessage } from "@/lib/client";
 import { useApi } from "@/lib/use-api";
@@ -41,13 +47,19 @@ export default function SettingsPage() {
   const { push } = useToast();
   const settings = useApi<Settings>("/api/settings");
   const detail = useApi<ServerDetail>(activeId ? `/api/servers/${activeId}` : null);
-  const [tab, setTab] = useState<"servers" | "github" | "accounts" | "security">("servers");
+  const [tab, setTab] = useState<"servers" | "github" | "accounts" | "security" | "appearance">("servers");
 
   // `?tab=github` is used by the OAuth callback and by the "open GitHub
   // configuration" button in the import dialog.
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get("tab");
-    if (requested === "github" || requested === "accounts" || requested === "security" || requested === "servers") {
+    if (
+      requested === "github" ||
+      requested === "accounts" ||
+      requested === "security" ||
+      requested === "appearance" ||
+      requested === "servers"
+    ) {
       setTab(requested);
     }
     const connected = new URLSearchParams(window.location.search).get("github");
@@ -155,7 +167,7 @@ export default function SettingsPage() {
         description="Connections, permissions, deployment policy and platform configuration."
         actions={
           <div className="flex gap-1 rounded-lg border border-ink-700/70 bg-ink-900/60 p-1">
-            {(["servers", "github", "accounts", "security"] as const).map((key) => (
+            {(["servers", "github", "accounts", "security", "appearance"] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => setTab(key)}
@@ -330,10 +342,17 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {tab === "github" && <GitHubSettings />}
+      {tab === "github" && (
+        <div className="space-y-4">
+          <GitHubSettings />
+          <GitHubBindingsPanel />
+        </div>
+      )}
 
       {tab === "accounts" && (
         <div className="space-y-4">
+          <RegistrationSettingsPanel />
+
           <Panel title="Administrators" subtitle="Role ceilings: owner > admin > operator > viewer">
             {settings.data?.users.length ? (
               <ul className="divide-y divide-ink-750/60">
@@ -403,6 +422,8 @@ export default function SettingsPage() {
 
       {tab === "security" && (
         <div className="space-y-4">
+          <BiometricSettingsPanel />
+
           <Panel title="Platform" subtitle="Environment and storage as seen by the server">
             <dl className="grid gap-2 text-[11px] sm:grid-cols-2">
               <Row label="Environment" value={settings.data?.env.ok ? "complete" : `missing ${settings.data?.env.missing.join(", ")}`} />
@@ -450,6 +471,8 @@ export default function SettingsPage() {
           </Panel>
         </div>
       )}
+
+      {tab === "appearance" && <AppearanceSettingsPanel />}
 
       <ConfirmDialog
         open={removeTarget !== null}

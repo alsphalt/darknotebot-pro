@@ -18,8 +18,12 @@ export async function register(): Promise<void> {
 
   try {
     const { runDueSyncJobs } = await import('./lib/github/sync');
+    const { pruneCache } = await import('./lib/cache');
     const timer = setInterval(() => {
       void runDueSyncJobs(2).catch(() => undefined);
+      // Cheap housekeeping on the same tick: expired settings/server cache
+      // entries are dropped instead of accumulating for the process lifetime.
+      pruneCache(200);
     }, 3_000);
     // Never keep the process alive just for the poller.
     timer.unref?.();

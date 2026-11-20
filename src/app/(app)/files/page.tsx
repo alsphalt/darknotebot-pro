@@ -13,6 +13,7 @@ import {
   FileText,
   Folder,
   FolderPlus,
+  Github,
   Lock,
   MoveRight,
   Pencil,
@@ -23,6 +24,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
+import { GitHubImportDialog, GitHubSyncBar } from "@/components/github/sync-bar";
 import { useServers, useToast } from "@/components/providers";
 import { Badge, ConfirmDialog, Empty, Modal, Panel, Spinner } from "@/components/ui";
 import { apiPost, download, errorMessage } from "@/lib/client";
@@ -66,13 +68,19 @@ function FilesView() {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("name");
   const [busy, setBusy] = useState<string | null>(null);
+  const [syncPulse, setSyncPulse] = useState(0);
+  const [importOpen, setImportOpen] = useState(false);
 
   const [dialog, setDialog] = useState<
     | null
     | { kind: "mkdir" | "create" | "rename" | "move"; target?: Entry }
     | { kind: "delete"; paths: string[] }
     | { kind: "upload" }
-    | { kind: "inspect"; entries: Array<{ path: string; size: number }>; file: File }
+    | {
+        kind: "inspect";
+        entries: Array<{ path: string; size: number; isDirectory?: boolean; unsafe?: string | null }>;
+        file: File;
+      }
   >(null);
 
   const [inputValue, setInputValue] = useState("");
@@ -99,13 +107,33 @@ function FilesView() {
     });
   }, [listing.data, filter, sort]);
 
-  const run = async (key: string, fn: () => Promise<unknown>, message: string) => {
+  /**
+   * Tell the shared GitHub engine what just changed on the panel.
+   *
+   * Fire-and-forget on purpose: a folder that is not bound to a repository (or a
+   * deployment where GitHub is not connected) is a normal state, and it must not
+   * turn a successful file operation into an error. The status bar below the
+   * toolbar shows exactly what happened.
+   */
+  const notifyGitHub = async (changes: { paths?: string[]; deletes?: string[] }) => {
+    if (!activeId) return;
+    setSyncPulse((value) => value + 1);
+    await apiPost("/api/github/files", { serverId: activeId, action: "detect", ...changes }).catch(() => undefined);
+  };
+
+  const run = async (
+    key: string,
+    fn: () => Promise<unknown>,
+    message: string,
+    changes?: { paths?: string[]; deletes?: string[] },
+  ) => {
     setBusy(key);
     try {
       await fn();
       push(message, "ok");
       await listing.refresh();
       setDialog(null);
+      if (changes) await notifyGitHub(changes);
     } catch (error) {
       push(errorMessage(error), "error");
     } finally {
@@ -145,11 +173,21 @@ function FilesView() {
             <button className="btn-ghost" onClick={() => { setDialog({ kind: "create" }); setInputValue(""); setCreateContent(""); }}>
               <Plus className="h-3.5 w-3.5" /> New file
             </button>
+            <button className="btn-ghost" onClick={() => setImportOpen(true)}>
+              <Github className="h-3.5 w-3.5" /> Import from GitHub
+            </button>
             <button className="btn-primary" onClick={() => { setDialog({ kind: "upload" }); setUploadTarget(currentDir); }}>
               <UploadCloud className="h-3.5 w-3.5" /> Upload
             </button>
           </>
         }
+      />
+
+      <GitHubSyncBar
+        serverId={activeId}
+        selection={selectedPaths}
+        pulse={syncPulse}
+        onAfterChange={() => void listing.refresh()}
       />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -316,13 +354,33 @@ function FilesView() {
                 }
                 if (dialog.kind === "create") {
                   const target = `${currentDir === "/" ? "" : currentDir}/${inputValue.trim()}`;
-                  void run("create", () => apiPost("/api/files/op", { action: "create", serverId: activeId, path: target, content: createContent }), "File created and indexed");
+                  void run(
+                    "create",
+                    () => apiPost("/api/files/op", { action: "create", serverId: activeId, path: target, content: createContent }),
+                    "File created and indexed",
+                    { paths: [target] },
+                  );
                 }
                 if (dialog.kind === "rename" && dialog.target) {
-                  void run("rename", () => apiPost("/api/files/op", { action: "rename", serverId: activeId, path: dialog.target!.path, newName: inputValue.trim() }), "Renamed on the server");
+                  const previousPath = dialog.target!.path;
+                  const nextPath = `${currentDir === "/" ? "" : currentDir}/${inputValue.trim()}`;
+                  void run(
+                    "rename",
+                    () => apiPost("/api/files/op", { action: "rename", serverId: activeId, path: previousPath, newName: inputValue.trim() }),
+                    "Renamed on the server",
+                    { paths: [nextPath], deletes: [previousPath] },
+                  );
                 }
                 if (dialog.kind === "move") {
-                  void run("move", () => apiPost("/api/files/op", { action: "move", serverId: activeId, paths: selectedPaths, destination: inputValue.trim() }), "Moved on the server");
+                  void run(
+                    "move",
+                    () => apiPost("/api/files/op", { action: "move", serverId: activeId, paths: selectedPaths, destination: inputValue.trim() }),
+                    "Moved on the server",
+                    {
+                      paths: selectedPaths.map((path) => `${inputValue.trim().replace(/\/+$/, "")}/${path.split("/").pop()}`),
+                      deletes: selectedPaths,
+                    },
+                  );
                 }
               }}
             >
@@ -346,7 +404,15 @@ function FilesView() {
       <ConfirmDialog
         open={dialog?.kind === "delete"}
         onClose={() => setDialog(null)}
-        onConfirm={() => dialog?.kind === "delete" && run("delete", () => apiPost("/api/files/op", { action: "delete", serverId: activeId, paths: dialog.paths }), "Deleted — previous contents were backed up")}
+        onConfirm={() =>
+          dialog?.kind === "delete" &&
+          run(
+            "delete",
+            () => apiPost("/api/files/op", { action: "delete", serverId: activeId, paths: dialog.paths }),
+            "Deleted — previous contents were backed up",
+            { deletes: dialog.paths },
+          )
+        }
         busy={busy === "delete"}
         danger
         title="Delete from production?"
@@ -428,6 +494,8 @@ function FilesView() {
                 push(`Uploaded ${result.summary.uploaded}, skipped ${result.summary.skipped}, failed ${result.summary.failed}`, result.summary.failed ? "error" : "ok");
                 await listing.refresh();
                 setDialog(null);
+                const uploadedPaths = (result.files ?? []).map((entry: { path: string }) => entry.path);
+                if (uploadedPaths.length) await notifyGitHub({ paths: uploadedPaths });
               } catch (error) {
                 push(errorMessage(error), "error");
               } finally {
@@ -475,6 +543,12 @@ function FilesView() {
                   push(`Extracted ${result.summary.extracted}, skipped ${result.summary.skipped}, failed ${result.summary.failed}`, "ok");
                   await listing.refresh();
                   setDialog(null);
+                  // The archive entries are known, so the exact paths that were
+                  // written are recorded — no guessing from the listing.
+                  const extractedPaths = (dialog.entries ?? [])
+                    .filter((entry) => !entry.isDirectory && !entry.unsafe)
+                    .map((entry) => `${uploadTarget.replace(/\/+$/, "")}/${entry.path}`);
+                  if (extractedPaths.length) await notifyGitHub({ paths: extractedPaths });
                 } catch (error) {
                   push(errorMessage(error), "error");
                 } finally {
@@ -496,6 +570,17 @@ function FilesView() {
           ))}
         </ul>
       </Modal>
+
+      <GitHubImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        serverId={activeId ?? ""}
+        destination={currentDir}
+        defaultRepo=""
+        defaultBranch=""
+        maxFiles={120}
+        onDone={() => void listing.refresh()}
+      />
     </>
   );
 }

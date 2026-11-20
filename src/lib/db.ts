@@ -14,7 +14,7 @@ export interface DbClient extends DbConnection {
   transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 interface Cache {
   client?: Promise<DbClient>;
@@ -151,6 +151,15 @@ async function migrate(client: DbClient): Promise<void> {
     await client.query(`alter table editor_drafts add column if not exists expected_sha256 text`);
     await client.query(`alter table editor_drafts add column if not exists chunk_count integer`);
   }
+
+  // v5: columns added to existing tables. `create table if not exists` in
+  // schema.sql does not touch a table that already exists, so every column that
+  // an older deployment is missing must be added here explicitly. Both
+  // statements are idempotent and safe to run on a fresh database too.
+  await client.query(
+    `alter table imported_project_files add column if not exists pending_delete boolean not null default false`,
+  );
+  await client.query(`alter table github_sync_jobs add column if not exists message text`);
 
   // v3: Error Intelligence (error_intel_events) and BIGBROTHER (conversations,
   // messages, memory, assets, tutorials, usage). schema.sql is idempotent, so

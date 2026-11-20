@@ -54,6 +54,8 @@ export interface ProjectFileRecord {
   contentOmitted: boolean;
   remoteSha: string | null;
   dirty: boolean;
+  /** Removed in the console; the next push deletes it on GitHub. */
+  pendingDelete: boolean;
   changedAt: string | null;
 }
 
@@ -115,6 +117,7 @@ function mapFile(row: Row): ProjectFileRecord {
     contentOmitted: Boolean(row.content_omitted),
     remoteSha: (row.remote_sha as string) ?? null,
     dirty: Boolean(row.dirty),
+    pendingDelete: Boolean(row.pending_delete),
     changedAt: (row.changed_at as string) ?? null,
   };
 }
@@ -410,6 +413,188 @@ export async function writeProjectFile(options: {
   }
   await refreshStats(options.projectId);
   return { file: mapFile(row), previousSha: current.sha256 };
+}
+
+/**
+ * Write a working-copy row from an outside source (a live panel file that the
+ * File Manager just saved, or a blob read back from GitHub).
+ *
+ * `dirty: false` means "record this as the new base without queueing a push" —
+ * used after a pull, so the file is not immediately pushed back.
+ */
+export async function upsertProjectFile(options: {
+  projectId: string;
+  path: string;
+  content: string | null;
+  sizeBytes: number;
+  sha256: string | null;
+  remoteSha: string | null;
+  dirty: boolean;
+  pendingDelete?: boolean;
+}): Promise<{ file: ProjectFileRecord; changed: boolean }> {
+  const existing = await getProjectFileByPath(options.projectId, options.path);
+  const pendingDelete = options.pendingDelete ?? false;
+  const changed = !existing || existing.content !== options.content || existing.pendingDelete !== pendingDelete;
+
+  if (!existing) {
+    const row = await queryOne<Row>(
+      `insert into imported_project_files
+         (id, project_id, path, name, extension, size_bytes, sha256, content, is_text, content_omitted,
+          remote_sha, dirty, pending_delete, changed_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,case when $11 then now() else null end)
+       returning *`,
+      [
+        uuid(),
+        options.projectId,
+        options.path,
+        baseNameOf(options.path),
+        extensionOf(options.path) || null,
+        options.sizeBytes,
+        options.sha256,
+        options.content,
+        options.content === null,
+        options.remoteSha,
+        options.dirty,
+        pendingDelete,
+      ],
+    );
+    if (!row) throw new ApiError('Could not store the file in the working copy.', 500, 'file_upsert_failed');
+    await refreshStats(options.projectId);
+    return { file: mapFile(row), changed: true };
+  }
+
+  if (!options.dirty) {
+    // Base update only: keep the content the working copy already holds unless
+    // the caller supplied new bytes.
+    const row = await queryOne<Row>(
+      `update imported_project_files
+          set content = coalesce($2, content),
+              sha256 = coalesce($3, sha256),
+              size_bytes = case when $2 is null then size_bytes else $4 end,
+              remote_sha = coalesce($5, remote_sha),
+              pending_delete = false,
+              dirty = false,
+              changed_at = null,
+              updated_at = now()
+        where project_id = $1 and id = $6
+        returning *`,
+      [options.projectId, options.content, options.sha256, options.sizeBytes, options.remoteSha, existing.id],
+    );
+    if (!row) throw new ApiError('Could not update the working copy.', 500, 'file_upsert_failed');
+    return { file: mapFile(row), changed };
+  }
+
+  const row = await queryOne<Row>(
+    `update imported_project_files
+        set content = $2, sha256 = $3, size_bytes = $4, is_text = $5, content_omitted = $6,
+            remote_sha = coalesce($7, remote_sha), dirty = true, pending_delete = $8,
+            changed_at = now(), updated_at = now()
+      where project_id = $1 and id = $9
+      returning *`,
+    [
+      options.projectId,
+      options.content,
+      options.sha256,
+      options.sizeBytes,
+      options.content !== null,
+      options.content === null,
+      options.remoteSha,
+      pendingDelete,
+      existing.id,
+    ],
+  );
+  if (!row) throw new ApiError('Could not update the working copy.', 500, 'file_upsert_failed');
+  await refreshStats(options.projectId);
+  return { file: mapFile(row), changed };
+}
+
+/**
+ * Record a local deletion.
+ *
+ * The row survives (`pending_delete`) until the commit that removes the file
+ * lands: if the push fails or conflicts, the fact that the file was deleted is
+ * not lost, and the operator can still see what is waiting.
+ */
+export async function markProjectFileDeleted(options: {
+  projectId: string;
+  path: string;
+  remoteSha: string | null;
+}): Promise<boolean> {
+  const existing = await getProjectFileByPath(options.projectId, options.path);
+  if (!existing) {
+    const row = await queryOne<Row>(
+      `insert into imported_project_files
+         (id, project_id, path, name, extension, size_bytes, sha256, content, is_text, content_omitted,
+          remote_sha, dirty, pending_delete, changed_at)
+       values ($1,$2,$3,$4,$5,0,null,null,true,true,$6,true,true,now())
+       returning *`,
+      [
+        uuid(),
+        options.projectId,
+        options.path,
+        baseNameOf(options.path),
+        extensionOf(options.path) || null,
+        options.remoteSha,
+      ],
+    );
+    return Boolean(row);
+  }
+  if (existing.pendingDelete) return false;
+  await query(
+    `update imported_project_files
+        set pending_delete = true, dirty = true, changed_at = now(), updated_at = now()
+      where project_id = $1 and id = $2`,
+    [options.projectId, existing.id],
+  );
+  return true;
+}
+
+/**
+ * Record the deletion of a path *and everything under it*.
+ *
+ * FILE MANAGER can delete a folder, and the working copy only tracks files. This
+ * marks every tracked descendant so the push removes them from the repository
+ * instead of silently leaving them behind.
+ */
+export async function markProjectTreeDeleted(options: {
+  projectId: string;
+  path: string;
+  remoteSha: string | null;
+}): Promise<number> {
+  const rows = await query<Row>(
+    `select id, path, remote_sha from imported_project_files
+      where project_id = $1 and (path = $2 or path like $3) and pending_delete = false`,
+    [options.projectId, options.path, `${options.path}/%`],
+  );
+  if (!rows.length) {
+    const inserted = await markProjectFileDeleted({
+      projectId: options.projectId,
+      path: options.path,
+      remoteSha: options.remoteSha,
+    });
+    return inserted ? 1 : 0;
+  }
+  for (const row of rows) {
+    await query(
+      `update imported_project_files
+          set pending_delete = true, dirty = true, changed_at = now(), updated_at = now()
+        where project_id = $1 and id = $2`,
+      [options.projectId, String(row.id)],
+    );
+  }
+  await refreshStats(options.projectId);
+  return rows.length;
+}
+
+/** Drop the tombstones whose deletion is now committed on GitHub. */
+export async function purgeDeletedFiles(projectId: string, paths: string[]): Promise<void> {
+  if (!paths.length) return;
+  const placeholders = paths.map((_, index) => `$${index + 2}`).join(',');
+  await query(
+    `delete from imported_project_files where project_id = $1 and pending_delete = true and path in (${placeholders})`,
+    [projectId, ...paths],
+  );
+  await refreshStats(projectId);
 }
 
 export async function markFilesClean(projectId: string, fileIds: string[]): Promise<void> {

@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowDownToLine,
   CheckCircle2,
   ClipboardPaste,
   CloudUpload,
@@ -12,6 +14,7 @@ import {
   Download,
   Expand,
   FileCode2,
+  Github,
   Keyboard,
   RotateCcw,
   Save,
@@ -22,7 +25,20 @@ import {
   X,
 } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
-import { CodeEditor } from "@/components/code-editor";
+import { GitHubSyncBar } from "@/components/github/sync-bar";
+/**
+ * Monaco is ~1 MB of JavaScript. Loading it lazily keeps the editor route's
+ * first paint (header, tabs, status) instant on a phone, and the component is
+ * only requested when a file is actually open.
+ */
+const CodeEditor = dynamic(() => import("@/components/code-editor").then((module) => module.CodeEditor), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center gap-2 text-xs text-slate-500">
+      <span className="h-3 w-3 animate-spin rounded-full border border-slate-600 border-t-transparent" /> Loading editor…
+    </div>
+  ),
+});
 import { useServers, useToast } from "@/components/providers";
 import { Badge, ConfirmDialog, Empty, Modal, Panel, Spinner, Status } from "@/components/ui";
 import { apiDelete, apiGet, apiPost, apiPut, download, errorMessage } from "@/lib/client";
@@ -237,6 +253,10 @@ function EditorView() {
   const [deployOpen, setDeployOpen] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployNote, setDeployNote] = useState("");
+  // GitHub: bumped after every local write so the shared bar re-reads its status.
+  const [syncPulse, setSyncPulse] = useState(0);
+  const [pushAfterDeploy, setPushAfterDeploy] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [openPath, setOpenPath] = useState("");
   const [draftBanner, setDraftBanner] = useState<{ path: string; content: string; baseSha: string | null; draftId: string | null } | null>(null);
   const [conflict, setConflict] = useState<{ message: string; details?: unknown } | null>(null);
@@ -445,7 +465,7 @@ function EditorView() {
     }
   };
 
-  const deploy = async () => {
+  const deploy = async (pushAfter = false) => {
     if (!current || !activeId) return;
     setDeploying(true);
     try {
@@ -518,6 +538,25 @@ function EditorView() {
           ),
         );
         router.refresh();
+
+        /**
+         * The file on the panel just changed. Record it in the shared working
+         * copy: if automatic synchronization is on, one commit follows ~5 s
+         * after the last save; "Save and push" asks for it immediately.
+         */
+        try {
+          await apiPost("/api/github/files", {
+            serverId: activeId,
+            action: pushAfter ? "push" : "detect",
+            paths: [current.path],
+            message: deployNote || null,
+          });
+          setSyncPulse((value) => value + 1);
+          if (pushAfter) push("Push requested — GitHub must confirm the commit", "ok");
+        } catch (syncError) {
+          // No binding or no connection is a normal state, not a deploy failure.
+          if (pushAfter) push(errorMessage(syncError), "error");
+        }
       } else {
         push(`${deployment.publicId}: ${deployment.error ?? deployment.status}`, "error");
       }
@@ -629,6 +668,16 @@ function EditorView() {
             <Link href="/files" className="btn-ghost"><FileCode2 className="h-3.5 w-3.5" /> Browse</Link>
           </>
         }
+      />
+
+      <GitHubSyncBar
+        serverId={activeId}
+        selection={current ? [current.path] : []}
+        pulse={syncPulse}
+        compact
+        onAfterChange={() => {
+          if (current) void openFile(current.path, 0, { fresh: true });
+        }}
       />
 
       <div className="mb-2 flex items-center gap-2">
@@ -781,7 +830,49 @@ function EditorView() {
                   >
                     <Download className="h-3 w-3" /> Download
                   </button>
-                  <button className="btn-primary !px-2 !py-1 text-[10px]" onClick={() => setDeployOpen(true)} disabled={!current.dirty}>
+                  <button
+                    className="btn-ghost !px-2 !py-1 text-[10px]"
+                    onClick={() => {
+                      if (!current || !activeId) return;
+                      setPulling(true);
+                      void apiPost<{ result: { restored: unknown[]; skipped: Array<{ reason: string }> } }>(
+                        "/api/github/files",
+                        {
+                          serverId: activeId,
+                          action: "pull",
+                          paths: [current.path],
+                          expectedHashes: current.sha ? { [current.path]: current.sha } : undefined,
+                        },
+                      )
+                        .then(async (data) => {
+                          if (data.result.restored.length) {
+                            push("Pulled the latest version from GitHub", "ok");
+                            setSyncPulse((value) => value + 1);
+                            await openFile(current.path, 0, { fresh: true });
+                          } else {
+                            push(data.result.skipped[0]?.reason ?? "Nothing was pulled", "error");
+                          }
+                        })
+                        .catch((error) => push(errorMessage(error), "error"))
+                        .finally(() => setPulling(false));
+                    }}
+                    disabled={pulling}
+                    title="Replace this file with the version on the connected branch"
+                  >
+                    {pulling ? <Spinner /> : <ArrowDownToLine className="h-3 w-3" />} Pull latest
+                  </button>
+                  <button
+                    className="btn-ghost !px-2 !py-1 text-[10px]"
+                    onClick={() => {
+                      setPushAfterDeploy(true);
+                      setDeployOpen(true);
+                    }}
+                    disabled={!current.dirty}
+                    title="Deploy, then push the file to GitHub"
+                  >
+                    <Github className="h-3 w-3" /> Save &amp; push
+                  </button>
+                  <button className="btn-primary !px-2 !py-1 text-[10px]" onClick={() => { setPushAfterDeploy(false); setDeployOpen(true); }} disabled={!current.dirty}>
                     <CloudUpload className="h-3 w-3" /> Deploy
                   </button>
                 </div>
@@ -908,8 +999,11 @@ function EditorView() {
 
       <ConfirmDialog
         open={deployOpen}
-        onClose={() => setDeployOpen(false)}
-        onConfirm={() => void deploy()}
+        onClose={() => {
+          setDeployOpen(false);
+          setPushAfterDeploy(false);
+        }}
+        onConfirm={() => void deploy(pushAfterDeploy)}
         busy={deploying}
         title="Deploy to production?"
         description={

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { PwaProvider } from "@/components/pwa";
+import { ChristmasProvider } from "@/components/christmas/provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -35,7 +36,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="dark">
       <body className="min-h-dvh antialiased">
-        <PwaProvider>{children}</PwaProvider>
+        <ChristmasProvider>
+          <PwaProvider>{children}</PwaProvider>
+        </ChristmasProvider>
       </body>
     </html>
   );

@@ -102,6 +102,66 @@ function clientIp(h: Headers): string {
   return h.get('x-forwarded-for')?.split(',')[0].trim() ?? 'unknown';
 }
 
+export interface StartedSession {
+  user: SessionUser;
+  csrfToken: string;
+  expiresAt: string;
+}
+
+/**
+ * Open an authenticated session for an already-proven identity.
+ *
+ * Shared by password sign-in and by passkey/biometric sign-in so both paths get
+ * the same cookie flags, the same CSRF token, the same IP/User-Agent recording,
+ * and the same failure surface. The caller is responsible for having verified
+ * the identity — this function never checks a password or a credential.
+ */
+export async function startSessionForUser(userId: string): Promise<StartedSession | null> {
+  const h = await headers();
+  const ip = clientIp(h);
+  const user = await queryOne<UserRow>('select * from admin_users where id = $1', [userId]);
+  if (!user || !user.is_active) return null;
+  if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return null;
+
+  const sessionId = uuid();
+  const token = randomToken(32);
+  const csrfToken = randomToken(24);
+  const expiresAt = new Date(Date.now() + env.sessionHours * 3600_000);
+  await query(
+    `insert into sessions (id, user_id, token_hash, csrf_token, ip, user_agent, expires_at)
+     values ($1,$2,$3,$4,$5,$6,$7::timestamptz)`,
+    [sessionId, user.id, hashSessionToken(token), csrfToken, ip, h.get('user-agent') ?? '', expiresAt.toISOString()],
+  );
+  await query(
+    `update admin_users set failed_attempts = 0, locked_until = null, last_login_at = now() where id = $1`,
+    [user.id],
+  );
+
+  const store = await cookies();
+  const secure = env.isProd;
+  store.set(SESSION_COOKIE, `${sessionId}.${token}`, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure,
+    path: '/',
+    expires: expiresAt,
+  });
+  // Readable by the app's own JS only to echo back as the CSRF header.
+  store.set(CSRF_COOKIE, csrfToken, {
+    httpOnly: false,
+    sameSite: 'lax',
+    secure,
+    path: '/',
+    expires: expiresAt,
+  });
+
+  return {
+    user: { ...toPrincipal(user), isActive: user.is_active },
+    csrfToken,
+    expiresAt: expiresAt.toISOString(),
+  };
+}
+
 export async function login(
   email: string,
   password: string,
@@ -163,44 +223,14 @@ export async function login(
   const valid = await verifyPassword(password, user.password_hash);
   if (!valid) return fail('bad_password');
 
-  const sessionId = uuid();
-  const token = randomToken(32);
-  const csrfToken = randomToken(24);
-  const expiresAt = new Date(Date.now() + env.sessionHours * 3600_000);
-  await query(
-    `insert into sessions (id, user_id, token_hash, csrf_token, ip, user_agent, expires_at)
-     values ($1,$2,$3,$4,$5,$6,$7::timestamptz)`,
-    [sessionId, user.id, hashSessionToken(token), csrfToken, ip, h.get('user-agent') ?? '', expiresAt.toISOString()],
-  );
-  await query(
-    `update admin_users set failed_attempts = 0, locked_until = null, last_login_at = now() where id = $1`,
-    [user.id],
-  );
+  const started = await startSessionForUser(user.id);
+  if (!started) return fail('locked');
   await query('insert into login_attempts (email, ip, success) values ($1,$2,true)', [normalized, ip]);
 
-  const store = await cookies();
-  const secure = env.isProd;
-  store.set(SESSION_COOKIE, `${sessionId}.${token}`, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure,
-    path: '/',
-    expires: expiresAt,
-  });
-  // Readable by the app's own JS only to echo back as the CSRF header.
-  store.set(CSRF_COOKIE, csrfToken, {
-    httpOnly: false,
-    sameSite: 'lax',
-    secure,
-    path: '/',
-    expires: expiresAt,
-  });
-
-  const principal = toPrincipal(user);
   return {
     ok: true,
-    csrfToken,
-    user: { ...principal, isActive: user.is_active },
+    csrfToken: started.csrfToken,
+    user: started.user,
   };
 }
 

@@ -686,6 +686,7 @@ create table if not exists imported_project_files (
   content_omitted boolean not null default false,
   remote_sha    text,                                -- git blob sha at import/last push
   dirty         boolean not null default false,
+  pending_delete boolean not null default false,      -- removed locally, delete on GitHub
   changed_at    timestamptz,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
@@ -739,6 +740,7 @@ create table if not exists github_sync_jobs (
   attempts      integer not null default 0,
   files         jsonb not null default '[]'::jsonb,
   trigger       text not null default 'auto',         -- auto | manual | retry
+  message       text,                                 -- operator-supplied commit message
   last_error    text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
@@ -758,3 +760,108 @@ create table if not exists github_sync_events (
   created_at  timestamptz not null default now()
 );
 create index if not exists github_sync_events_project_idx on github_sync_events (project_id, id desc);
+
+-- ---------------------------------------------------------------------------
+-- 27. Platform settings (single key/value store for administrator switches)
+--
+-- Appearance (Christmas effects / animated introduction), security (passkeys,
+-- biometric login) and registration policy live here instead of in new tables,
+-- because they are read on nearly every request and are pure configuration.
+-- Reads go through src/lib/settings/platform.ts, which caches them in process.
+-- ---------------------------------------------------------------------------
+create table if not exists platform_settings (
+  key        text primary key,
+  value      jsonb not null default '{}'::jsonb,
+  updated_by text,
+  updated_at timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
+-- 28. WebAuthn / passkeys (biometric authentication)
+--
+-- Only public-key material is stored. No fingerprint, face image, or biometric
+-- template ever reaches this database: the operating system verifies the user
+-- and hands the browser a signature over a server-issued challenge.
+-- ---------------------------------------------------------------------------
+create table if not exists webauthn_credentials (
+  id              text primary key,
+  user_id         text not null references admin_users(id) on delete cascade,
+  credential_id   text not null,                        -- base64url of the raw id
+  public_key      text not null,                        -- base64url COSE_Key bytes
+  algorithm       integer not null default -7,          -- -7 ES256 | -257 RS256
+  counter         bigint not null default 0,
+  transports      jsonb not null default '[]'::jsonb,
+  device_label    text,
+  attachment      text,                                 -- platform | cross-platform
+  aaguid          text,
+  backup_eligible boolean not null default false,
+  backup_state    boolean not null default false,
+  user_verified   boolean not null default true,
+  created_at      timestamptz not null default now(),
+  last_used_at    timestamptz,
+  last_ip         text,
+  revoked_at      timestamptz,
+  revoked_by      text
+);
+create unique index if not exists webauthn_credentials_credential_key on webauthn_credentials (credential_id);
+create index if not exists webauthn_credentials_user_idx on webauthn_credentials (user_id, created_at desc);
+
+-- One row per ceremony. The challenge is single-use, expires in minutes, and is
+-- deleted when it is consumed, so a replay cannot succeed twice.
+create table if not exists webauthn_challenges (
+  id          text primary key,
+  challenge   text not null,
+  purpose     text not null,                            -- register | authenticate
+  user_id     text,
+  rp_id       text,
+  origin      text,
+  ip          text,
+  user_agent  text,
+  created_at  timestamptz not null default now(),
+  expires_at  timestamptz not null,
+  used_at     timestamptz
+);
+create index if not exists webauthn_challenges_expiry_idx on webauthn_challenges (expires_at);
+
+-- ---------------------------------------------------------------------------
+-- 29. Server ↔ repository bindings
+--
+-- FILE MANAGER and the CODE EDITOR work on a live Pterodactyl filesystem, not on
+-- an imported project. A binding points one server at one imported project, so
+-- those two surfaces push and pull through the same connection, the same working
+-- copy and the same synchronization engine as CRASH AND FIX — no second GitHub
+-- client, no second token, no second copy of the repository.
+--
+-- `path_prefix` maps the panel root onto a repository folder: files under
+-- /plugins are pushed as <path_prefix>/plugins/... .
+-- ---------------------------------------------------------------------------
+create table if not exists server_github_bindings (
+  id          text primary key,
+  server_id   text not null references connected_servers(id) on delete cascade,
+  project_id  text not null references imported_projects(id) on delete cascade,
+  path_prefix text not null default '',
+  auto_sync   boolean not null default true,
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create unique index if not exists server_github_bindings_server_key on server_github_bindings (server_id);
+create index if not exists server_github_bindings_project_idx on server_github_bindings (project_id);
+
+-- Deletions travel through the queue as well: a removed file keeps its row with
+-- `pending_delete = true` until the commit that removes it from GitHub lands.
+create index if not exists imported_project_files_pending_delete_idx
+  on imported_project_files (project_id) where pending_delete = true;
+
+-- ---------------------------------------------------------------------------
+-- 30. Indexes for the hot read paths
+--
+-- Session validation runs on every request, the activity log is read newest
+-- first, and the backup list is always scoped to one file. Without these the
+-- console does sequential scans on tables that only grow.
+-- ---------------------------------------------------------------------------
+create index if not exists sessions_expiry_idx on sessions (expires_at);
+create index if not exists sessions_active_user_idx on sessions (user_id) where revoked_at is null;
+create index if not exists activity_logs_user_idx on activity_logs (user_id, created_at desc);
+create index if not exists file_backups_server_path_idx on file_backups (server_id, path, created_at desc);
+create index if not exists imported_project_files_project_idx on imported_project_files (project_id, path);

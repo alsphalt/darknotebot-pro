@@ -308,7 +308,15 @@ export class GitHubClient {
   async createTree(
     owner: string,
     repo: string,
-    body: { base_tree?: string; tree: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> },
+    /**
+     * `sha: null` deletes the path from the tree. That is the documented way to
+     * remove a file through the Git Data API, and it is the only deletion this
+     * console ever performs.
+     */
+    body: {
+      base_tree?: string;
+      tree: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string | null }>;
+    },
   ): Promise<{ sha: string }> {
     return this.request<{ sha: string }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`, {
       method: 'POST',

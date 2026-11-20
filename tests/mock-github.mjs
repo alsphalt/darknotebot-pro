@@ -164,9 +164,11 @@ export async function createMockGitHub({
       state.counter += 1;
       const base = state.trees.get(body.base_tree) ?? [];
       const replaced = new Set(body.tree.map((entry) => entry.path));
+      // `sha: null` removes the path — the documented Git Data API deletion.
+      const upserts = body.tree.filter((entry) => entry.sha !== null);
       const merged = [
         ...base.filter((entry) => !replaced.has(entry.path)),
-        ...body.tree.map((entry) => ({
+        ...upserts.map((entry) => ({
           path: entry.path,
           mode: entry.mode,
           type: 'blob',

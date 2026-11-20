@@ -1,9 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Eye, EyeOff, KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Check, Eye, EyeOff, Fingerprint, KeyRound, Loader2, ShieldCheck, TerminalSquare } from "lucide-react";
 import { ApiError, apiGet, apiPost, errorMessage } from "@/lib/client";
+import { authenticateWithPasskey, hasPlatformAuthenticator, isWebAuthnSupported } from "@/lib/webauthn-client";
 import {
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
@@ -11,6 +13,13 @@ import {
   passwordChecklist,
   passwordProblems,
 } from "@/lib/auth/password-policy";
+
+type PublicPolicy = {
+  registrationEnabled: boolean;
+  passkeysEnabled: boolean;
+  biometricLoginEnabled: boolean;
+  branding: { product: string; credit: string };
+};
 
 type SessionInfo = {
   user: { id: string; name: string; email: string; role: string } | null;
@@ -30,6 +39,21 @@ export default function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [policy, setPolicy] = useState<PublicPolicy | null>(null);
+  const [biometricSupported, setBiometricSupported] = useState(false);
+  const [biometricBusy, setBiometricBusy] = useState(false);
+  const [biometricNote, setBiometricNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiGet<PublicPolicy>("/api/auth/policy")
+      .then(setPolicy)
+      .catch(() => undefined);
+    // Feature detection runs after mount so the server-rendered markup and the
+    // first client paint agree.
+    if (isWebAuthnSupported()) {
+      void hasPlatformAuthenticator().then(setBiometricSupported);
+    }
+  }, []);
 
   useEffect(() => {
     apiGet<SessionInfo>("/api/auth/session")
@@ -42,6 +66,32 @@ export default function LoginPage() {
         if (!(err instanceof ApiError) || err.status !== 401) setError(errorMessage(err));
       });
   }, [router]);
+
+  /**
+   * Biometric sign-in. The OS verifies the user; the server verifies the
+   * signature over its own challenge. Password sign-in is untouched and always
+   * available below.
+   */
+  const signInWithBiometrics = async () => {
+    setError(null);
+    setBiometricNote(null);
+    setBiometricBusy(true);
+    try {
+      if (!biometricSupported) {
+        setBiometricNote(
+          "This device does not offer biometric authentication to the browser. Use your password — passkeys can be enrolled later from Settings → Security.",
+        );
+        return;
+      }
+      await authenticateWithPasskey(email.trim() || undefined);
+      router.replace("/");
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : errorMessage(err));
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -297,6 +347,39 @@ export default function LoginPage() {
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
             {mode === "login" ? "Sign in" : "Create owner account"}
           </button>
+
+          {mode === "login" && policy?.biometricLoginEnabled && (
+            <>
+              <div className="my-4 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-slate-600">
+                <span className="h-px flex-1 bg-ink-750" /> or <span className="h-px flex-1 bg-ink-750" />
+              </div>
+              <button
+                type="button"
+                className="btn-ghost w-full"
+                onClick={() => void signInWithBiometrics()}
+                disabled={biometricBusy}
+              >
+                {biometricBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Fingerprint className="h-4 w-4" />}
+                Sign in with fingerprint / face
+              </button>
+              <p className="mt-1.5 text-center text-[10px] leading-relaxed text-slate-600">
+                {biometricSupported
+                  ? "Your device verifies you. DARKNOTE stores only a public key."
+                  : "No biometric authenticator detected on this device — password sign-in still works."}
+              </p>
+              {biometricNote && (
+                <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                  {biometricNote}
+                </p>
+              )}
+            </>
+          )}
+
+          {mode === "login" && policy?.registrationEnabled && (
+            <Link href="/register" className="btn-ghost mt-2 w-full">
+              Create an account
+            </Link>
+          )}
 
           {!info?.needsBootstrap && (
             <button

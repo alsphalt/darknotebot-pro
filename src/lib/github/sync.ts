@@ -8,6 +8,7 @@ import {
   listDirtyFiles,
   listSyncEvents,
   markFilesClean,
+  purgeDeletedFiles,
   requireProject,
   setRemoteShas,
   updateProject,
@@ -61,6 +62,7 @@ interface JobRow {
   attempts: number;
   files: unknown;
   trigger: string;
+  message: string | null;
   last_error: string | null;
 }
 
@@ -68,6 +70,7 @@ export async function scheduleSync(
   projectId: string,
   files: string[],
   trigger: 'auto' | 'manual' | 'retry' = 'auto',
+  message: string | null = null,
 ): Promise<SyncSchedule> {
   const project = await requireProject(projectId);
   if (project.source !== 'github' || !project.githubOwner || !project.githubRepo) {
@@ -83,15 +86,16 @@ export async function scheduleSync(
   const merged = Array.from(new Set(files.filter(Boolean)));
 
   const row = await queryOne<JobRow>(
-    `insert into github_sync_jobs (id, project_id, status, not_before, attempts, files, trigger)
-     values ($1,$2,'pending',$3,0,$4,$5)
+    `insert into github_sync_jobs (id, project_id, status, not_before, attempts, files, trigger, message)
+     values ($1,$2,'pending',$3,0,$4,$5,$6)
      on conflict (project_id) where status = 'pending' do update set
        not_before = excluded.not_before,
        files = excluded.files,
        trigger = excluded.trigger,
+       message = coalesce(excluded.message, github_sync_jobs.message),
        updated_at = now()
      returning *`,
-    [uuid(), projectId, notBefore, jsonb(merged), trigger],
+    [uuid(), projectId, notBefore, jsonb(merged), trigger, message],
   );
 
   await updateProject(projectId, {
@@ -211,13 +215,26 @@ export async function getSyncState(projectId: string): Promise<SyncStateView> {
   };
 }
 
-function commitMessage(project: ProjectRecord, files: ProjectFileRecord[]): string {
-  const list = files
-    .slice(0, 12)
-    .map((file) => `- ${file.path}`)
-    .join('\n');
-  const more = files.length > 12 ? `\n- …and ${files.length - 12} more` : '';
-  return `Darknote: update ${files.length} file${files.length === 1 ? '' : 's'} in ${project.name}\n\n${list}${more}\n\nSaved from the DARKNOTE CRASH AND FIX panel.`;
+/**
+ * Commit message. An operator-supplied first line (Commit changes…) is kept
+ * verbatim so the history stays readable and attributable; the file list is
+ * always appended so a commit can be audited without opening it.
+ */
+function commitMessage(project: ProjectRecord, files: ProjectFileRecord[], custom?: string | null): string {
+  const upserts = files.filter((file) => !file.pendingDelete);
+  const deletes = files.filter((file) => file.pendingDelete);
+  const list = [
+    ...upserts.slice(0, 12).map((file) => `- ${file.path}`),
+    ...deletes.slice(0, 6).map((file) => `- ${file.path} (deleted)`),
+  ].join('\n');
+  const shown = Math.min(upserts.length, 12) + Math.min(deletes.length, 6);
+  const more = files.length > shown ? `\n- …and ${files.length - shown} more` : '';
+
+  const subject = (custom ?? '').trim().split('\n')[0].slice(0, 120);
+  if (subject) {
+    return `${subject}\n\nDarknote: ${files.length} file${files.length === 1 ? '' : 's'} in ${project.name}\n\n${list}${more}`;
+  }
+  return `Darknote: synchronize ${project.name}\n\n${list}${more}\n\nPushed from the DARKNOTE console.`;
 }
 
 interface PushOutcome {
@@ -225,6 +242,7 @@ interface PushOutcome {
   commitUrl: string;
   message: string;
   files: string[];
+  deleted: string[];
   blobShas: Array<{ path: string; sha: string }>;
 }
 
@@ -232,6 +250,7 @@ async function pushChanges(
   project: ProjectRecord,
   files: ProjectFileRecord[],
   client: GitHubClient,
+  customMessage?: string | null,
 ): Promise<PushOutcome> {
   const owner = project.githubOwner!;
   const repo = project.githubRepo!;
@@ -260,6 +279,20 @@ async function pushChanges(
 
   for (const file of files) {
     const remoteSha = remoteShas.get(file.path) ?? null;
+
+    if (file.pendingDelete) {
+      // Deleting a file somebody else edited after we recorded it is exactly the
+      // silent-overwrite case this engine exists to prevent.
+      if (file.remoteSha && remoteSha && file.remoteSha !== remoteSha) {
+        throw new SyncConflict(
+          `“${file.path}” was deleted here but changed on GitHub since the working copy was taken. Nothing was pushed — the remote file is untouched.`,
+          'sync_delete_conflict',
+          { file: file.path, expected: file.remoteSha, remote: remoteSha },
+        );
+      }
+      continue;
+    }
+
     if (file.remoteSha && remoteSha && file.remoteSha !== remoteSha) {
       throw new SyncConflict(
         `A file you edited was also changed on GitHub (its blob sha no longer matches). Nothing was pushed — the local edit is kept.`,
@@ -281,7 +314,14 @@ async function pushChanges(
   });
 
   const blobShas: Array<{ path: string; sha: string }> = [];
+  const deleted: string[] = [];
   for (const file of files) {
+    if (file.pendingDelete) {
+      // Only a path that really exists in the base tree can be removed; if it is
+      // already gone remotely there is nothing to do and nothing to report.
+      if (remoteShas.has(file.path)) deleted.push(file.path);
+      continue;
+    }
     if (file.content === null) {
       throw new SyncConflict(
         `The file “${file.path}” has no stored text copy, so it cannot be pushed.`,
@@ -292,12 +332,17 @@ async function pushChanges(
     blobShas.push({ path: file.path, sha: blob.sha });
   }
 
+  const treeEntries: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string | null }> = [
+    ...blobShas.map((entry) => ({ path: entry.path, mode: '100644' as const, type: 'blob' as const, sha: entry.sha })),
+    ...deleted.map((path) => ({ path, mode: '100644' as const, type: 'blob' as const, sha: null })),
+  ];
+
   const tree = await client.createTree(owner, repo, {
     base_tree: remoteCommit.tree.sha,
-    tree: blobShas.map((entry) => ({ path: entry.path, mode: '100644' as const, type: 'blob' as const, sha: entry.sha })),
+    tree: treeEntries,
   });
 
-  const message = commitMessage(project, files);
+  const message = commitMessage(project, files, customMessage);
   const commit = await client.createCommit(owner, repo, {
     message,
     tree: tree.sha,
@@ -345,7 +390,8 @@ async function pushChanges(
     commitSha: commit.sha,
     commitUrl: commit.html_url || `https://github.com/${owner}/${repo}/commit/${commit.sha}`,
     message,
-    files: files.map((file) => file.path),
+    files: files.filter((file) => !file.pendingDelete).map((file) => file.path),
+    deleted,
     blobShas,
   };
 }
@@ -388,8 +434,9 @@ export async function processJob(job: JobRow): Promise<void> {
     const token = await requireToken();
     const client = new GitHubClient(token);
     const dirty = await listDirtyFiles(project.id);
-    const pushable = dirty.filter((file) => file.content !== null);
-    if (!pushable.length) {
+    const pushable = dirty.filter((file) => !file.pendingDelete && file.content !== null);
+    const deletions = dirty.filter((file) => file.pendingDelete);
+    if (!pushable.length && !deletions.length) {
       await query(
         `update github_sync_jobs set status = 'succeeded', updated_at = now(), finished_at = now() where id = $1`,
         [job.id],
@@ -399,7 +446,7 @@ export async function processJob(job: JobRow): Promise<void> {
       return;
     }
 
-    const outcome = await pushChanges(project, pushable, client);
+    const outcome = await pushChanges(project, [...pushable, ...deletions], client, job.message);
 
     if (outcome.blobShas.length)
       await setRemoteShas(
@@ -407,6 +454,7 @@ export async function processJob(job: JobRow): Promise<void> {
         outcome.blobShas.map((entry) => ({ path: entry.path, remoteSha: entry.sha })),
       );
     await markFilesClean(project.id, pushable.map((file) => file.id));
+    await purgeDeletedFiles(project.id, outcome.deleted);
     await updateProject(project.id, {
       baseCommitSha: outcome.commitSha,
       lastPushedSha: outcome.commitSha,
@@ -426,7 +474,12 @@ export async function processJob(job: JobRow): Promise<void> {
       'success',
       'done',
       '[+] GITHUB SYNCHRONIZED SUCCESSFULLY',
-      { commit: outcome.commitSha, files: outcome.files.length, url: outcome.commitUrl },
+      {
+        commit: outcome.commitSha,
+        files: outcome.files.length,
+        deleted: outcome.deleted.length,
+        url: outcome.commitUrl,
+      },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -465,7 +518,11 @@ export async function runDueSyncJobs(limit = 2): Promise<{ processed: number }> 
 }
 
 /** Manual sync: push now, ignoring the debounce window. */
-export async function syncProjectNow(projectId: string, trigger: 'manual' | 'retry' = 'manual'): Promise<SyncStateView> {
+export async function syncProjectNow(
+  projectId: string,
+  trigger: 'manual' | 'retry' = 'manual',
+  message: string | null = null,
+): Promise<SyncStateView> {
   const project = await requireProject(projectId);
   if (project.source !== 'github' || !project.githubOwner || !project.githubRepo) {
     throw new ApiError('That project is not connected to a GitHub repository.', 400, 'project_not_github');
@@ -479,16 +536,17 @@ export async function syncProjectNow(projectId: string, trigger: 'manual' | 'ret
   // waiting); otherwise open a fresh one so a manual push always runs now.
   const job =
     (await queryOne<JobRow>(
-      `update github_sync_jobs set status = 'running', attempts = attempts + 1, updated_at = now(), trigger = $2
+      `update github_sync_jobs set status = 'running', attempts = attempts + 1, updated_at = now(), trigger = $2,
+              message = coalesce($3, message)
         where project_id = $1 and status = 'pending'
         returning *`,
-      [projectId, trigger],
+      [projectId, trigger, message],
     )) ??
     (await queryOne<JobRow>(
-      `insert into github_sync_jobs (id, project_id, status, not_before, attempts, files, trigger)
-       values ($1,$2,'running',now(),1,'[]'::jsonb,$3)
+      `insert into github_sync_jobs (id, project_id, status, not_before, attempts, files, trigger, message)
+       values ($1,$2,'running',now(),1,'[]'::jsonb,$3,$4)
        returning *`,
-      [uuid(), projectId, trigger],
+      [uuid(), projectId, trigger, message],
     ));
   if (job) await processJob(job);
   return getSyncState(projectId);

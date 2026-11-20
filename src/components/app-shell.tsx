@@ -24,7 +24,6 @@ import {
   Settings,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   TerminalSquare,
   Workflow,
   X,
@@ -35,7 +34,9 @@ import { InstallAppButton, OfflineNotice, PwaUpdateToast, usePwaInstall } from "
 import { Status } from "./ui";
 import { apiGet, apiPost } from "@/lib/client";
 import { BigBrotherOrb } from "./bigbrother/orb";
+import { BigBrotherPanel } from "./bigbrother/panel";
 import { ErrorReporter } from "./error-reporter";
+import { useChristmas } from "./christmas/provider";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -54,7 +55,6 @@ const NAV = [
   { href: "/downloads", label: "Download Center", icon: Download },
   { href: "/console", label: "Terminal & Logs", icon: TerminalSquare },
   { href: "/errors", label: "Error Center", icon: ShieldAlert },
-  { href: "/bigbrother", label: "BIGBROTHER AI", icon: Sparkles },
   { href: "/settings", label: "Admin Settings", icon: Settings },
 ];
 
@@ -82,6 +82,8 @@ export function AppShell({
   const [open, setOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [openProblems, setOpenProblems] = useState(0);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const { prefs } = useChristmas();
 
   // One cheap read per session so the floating orb can show a real problem dot.
   useEffect(() => {
@@ -133,7 +135,9 @@ export function AppShell({
       </div>
       <div className="min-w-0">
         <p className="truncate text-[13px] font-semibold tracking-[0.16em] text-slate-100">DARKNOTE</p>
-        <p className="truncate text-[10px] uppercase tracking-[0.24em] text-slate-500">Control Center</p>
+        <p className="truncate text-[10px] uppercase tracking-[0.24em] text-slate-500">
+          {prefs.mode === "off" ? "Control Center" : "Jimmy M, Tech"}
+        </p>
       </div>
     </div>
   );
@@ -202,6 +206,7 @@ export function AppShell({
       )}
 
       <div className="lg:pl-[248px]">
+        {prefs.mode !== "off" && <div className="xmas-ribbon h-[2px] w-full opacity-80" aria-hidden="true" />}
         <header className="sticky top-0 z-30 border-b border-ink-750/70 bg-ink-950/80 backdrop-blur-xl">
           <div className="flex items-center gap-2 px-3 py-2.5 sm:px-6">
             <button
@@ -280,7 +285,12 @@ export function AppShell({
 
       <PwaUpdateToast />
       <ErrorReporter />
-      <BigBrotherOrb hasProblems={openProblems > 0} />
+      <BigBrotherOrb
+        hasProblems={openProblems > 0}
+        open={assistantOpen}
+        onOpen={() => setAssistantOpen((current) => !current)}
+      />
+      <BigBrotherPanel open={assistantOpen} onClose={() => setAssistantOpen(false)} />
     </div>
   );
 }

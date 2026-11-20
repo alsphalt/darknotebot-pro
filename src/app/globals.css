@@ -413,6 +413,30 @@ input[type="checkbox"] {
   }
 }
 
+/* The floating assistant panel: rises out of the orb instead of jumping. */
+.bb-panel {
+  animation: bb-panel-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transform-origin: bottom right;
+}
+
+@keyframes bb-panel-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.bb-orb[data-open="true"] {
+  box-shadow:
+    0 0 0 1px rgba(5, 6, 10, 0.6),
+    0 0 0 2px rgba(109, 94, 252, 0.4),
+    0 14px 40px -8px rgba(109, 94, 252, 0.95);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .bb-word-down,
   .bb-word-up,
@@ -420,7 +444,8 @@ input[type="checkbox"] {
   .bb-stage::after,
   .bb-orb::before,
   .bb-orb::after,
-  .bb-orb-mist span {
+  .bb-orb-mist span,
+  .bb-panel {
     animation: none !important;
   }
   .bb-word-down,
@@ -491,4 +516,277 @@ input[type="checkbox"] {
 .bb-prose strong {
   color: #fff;
   font-weight: 650;
+}
+
+/* ============================================================================
+   CHRISTMAS EDITION
+   Festive accents layered on top of the DARKNOTE palette. Everything here is
+   opt-out: `data-christmas="off"` removes it, `data-motion="reduced"` (or the OS
+   reduced-motion setting) stops every animation. No canvas, no images — just
+   gradients and a handful of keyframes, so the cost is a few composited layers.
+   ========================================================================== */
+:root {
+  --xmas-red: #e04a5f;
+  --xmas-green: #2fa96b;
+  --xmas-gold: #f3c96b;
+  --xmas-ice: #dff1ff;
+}
+
+html[data-christmas="on"] body {
+  background:
+    radial-gradient(1100px 620px at 10% -12%, rgba(224, 74, 95, 0.14), transparent 60%),
+    radial-gradient(900px 520px at 94% -4%, rgba(47, 169, 107, 0.12), transparent 58%),
+    radial-gradient(700px 420px at 50% 108%, rgba(243, 201, 107, 0.07), transparent 60%),
+    #05060a;
+}
+
+html[data-christmas="on"] .panel {
+  box-shadow:
+    0 0 0 1px rgba(243, 201, 107, 0.06),
+    0 24px 48px -32px rgba(224, 74, 95, 0.35);
+}
+
+.xmas-ribbon {
+  background-image: linear-gradient(
+    90deg,
+    rgba(224, 74, 95, 0.55),
+    rgba(243, 201, 107, 0.55),
+    rgba(47, 169, 107, 0.55),
+    rgba(224, 74, 95, 0.55)
+  );
+  background-size: 300% 100%;
+  animation: xmas-ribbon 9s linear infinite;
+}
+
+@keyframes xmas-ribbon {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 300% 50%;
+  }
+}
+
+/* ---------------------------------------------------------------- intro */
+.xmas-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 600px at 50% 40%, rgba(12, 16, 28, 0.96), rgba(3, 4, 9, 0.99) 70%),
+    #03040a;
+  animation: xmas-intro-in 420ms ease-out both;
+}
+
+.xmas-intro[data-leaving="true"] {
+  animation: xmas-intro-out 620ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  pointer-events: none;
+}
+
+@keyframes xmas-intro-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes xmas-intro-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.04);
+  }
+}
+
+.xmas-brand {
+  font-family: var(--font-sans);
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  font-size: clamp(2rem, 9vw, 5.2rem);
+  line-height: 1;
+  color: #f7fbff;
+  text-shadow:
+    0 0 18px rgba(223, 241, 255, 0.45),
+    0 0 60px rgba(109, 94, 252, 0.35),
+    0 0 120px rgba(224, 74, 95, 0.25);
+  animation: xmas-brand-in 1500ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
+.xmas-brand span {
+  background: linear-gradient(180deg, #ffffff, #dff1ff 40%, #f3c96b 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes xmas-brand-in {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
+    filter: blur(14px);
+    letter-spacing: 0.55em;
+  }
+  60% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    letter-spacing: 0.22em;
+  }
+}
+
+.xmas-credit {
+  margin-top: 1.1rem;
+  font-size: clamp(0.6rem, 2.4vw, 0.85rem);
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: rgba(223, 241, 255, 0.72);
+  animation: xmas-fade-up 900ms ease-out 1900ms both;
+}
+
+@keyframes xmas-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.xmas-halo {
+  position: absolute;
+  width: min(78vw, 620px);
+  aspect-ratio: 1;
+  border-radius: 999px;
+  background: conic-gradient(
+    from 0deg,
+    rgba(224, 74, 95, 0.16),
+    rgba(243, 201, 107, 0.12),
+    rgba(47, 169, 107, 0.14),
+    rgba(109, 94, 252, 0.16),
+    rgba(224, 74, 95, 0.16)
+  );
+  filter: blur(38px);
+  animation: xmas-halo 6s linear infinite;
+}
+
+@keyframes xmas-halo {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* String of lights across the top of the intro and the shell. */
+.xmas-lights {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 46px;
+  display: flex;
+  justify-content: space-between;
+  padding: 0 3%;
+  pointer-events: none;
+}
+
+.xmas-lights i {
+  width: 7px;
+  height: 7px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: var(--xmas-gold);
+  box-shadow: 0 0 12px 3px rgba(243, 201, 107, 0.55);
+  animation: xmas-twinkle 2.4s ease-in-out infinite;
+}
+
+.xmas-lights i:nth-child(3n) {
+  background: var(--xmas-red);
+  box-shadow: 0 0 12px 3px rgba(224, 74, 95, 0.5);
+  animation-delay: 0.6s;
+}
+
+.xmas-lights i:nth-child(3n + 1) {
+  background: var(--xmas-green);
+  box-shadow: 0 0 12px 3px rgba(47, 169, 107, 0.5);
+  animation-delay: 1.2s;
+}
+
+@keyframes xmas-twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(2px) scale(1.15);
+  }
+}
+
+.xmas-skip {
+  position: absolute;
+  bottom: 1.6rem;
+  right: 1.6rem;
+  border: 1px solid rgba(223, 241, 255, 0.18);
+  background: rgba(9, 12, 22, 0.7);
+  color: rgba(223, 241, 255, 0.72);
+  border-radius: 999px;
+  padding: 0.45rem 0.95rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.xmas-skip:hover {
+  color: #fff;
+  border-color: rgba(243, 201, 107, 0.55);
+}
+
+/* Canvas snow sits above the page but below modals and the intro. */
+.xmas-snow {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* ------------------------------------------------------- reduced motion */
+html[data-motion="reduced"] .xmas-ribbon,
+html[data-motion="reduced"] .xmas-halo,
+html[data-motion="reduced"] .xmas-lights i,
+html[data-motion="reduced"] .xmas-brand,
+html[data-motion="reduced"] .xmas-credit {
+  animation: none !important;
+}
+
+html[data-motion="reduced"] .xmas-snow {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xmas-ribbon,
+  .xmas-halo,
+  .xmas-lights i,
+  .xmas-brand,
+  .xmas-credit,
+  .xmas-intro,
+  .xmas-intro[data-leaving="true"] {
+    animation: none !important;
+  }
+  .xmas-snow {
+    display: none;
+  }
 }
