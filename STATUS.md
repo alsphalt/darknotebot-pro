@@ -2,6 +2,51 @@
 
 Last updated: 2026-11-20 · branch `main`
 
+## Production incident — "a server-side exception has occurred" (fixed)
+
+Symptom: `v0-darknote.vercel.app` showed the Next.js error page
+(`Application error: a server-side exception has occurred … Digest: 2171611015`)
+for a signed-in browser, and every `/api/*` route answered
+`500 {"error":"column \"pending_delete\" does not exist"}`.
+
+Cause — a migration that cannot converge:
+
+1. `imported_project_files` was created by an older build (v4 schema, no
+   `pending_delete` column).
+2. `create table if not exists` never alters an existing table, so the column was
+   still missing.
+3. `migrate()` ran `db/schema.sql` **before** the ALTERs that add the column, and
+   schema.sql line 854 creates `imported_project_files_pending_delete_idx … where
+   pending_delete = true` → `column "pending_delete" does not exist`.
+4. That throws before `schema_migrations` is written, so every cold start retried
+   and failed again: the whole authenticated surface stayed at 500.
+5. `/` renders the authenticated layout for a browser that holds a session
+   cookie → `currentUser()` → first query → the same exception → the digest page.
+   Anonymous `curl /` only sees the 307 to `/login`, which is why it looked
+   intermittent.
+
+Fix (`src/lib/db.ts`): a pre-flight `repairLegacyColumns()` runs before
+`schema.sql` and independently of the version marker. It adds
+`imported_project_files.pending_delete`, `github_sync_jobs.message` and the
+`editor_drafts` v2 columns when the table exists without them. schema.sql then
+finds every column its indexes reference, and the marker is recorded once.
+Existing data is untouched — only missing columns are added.
+
+Second defect in the same deploy (`src/lib/env.ts`): `ensureDataDirs()` ran
+`mkdir '/var/task/.data'` on Vercel's read-only filesystem, so `/api/health`
+returned `500 ENOENT … mkdir '/var/task/.data'` and any upload/backup write
+failed. It now falls back to `os.tmpdir()/darknote-data`, logs one warning, and
+keeps `backupDir`/`uploadDir`/`pgliteDir` consistent. On serverless that
+directory is ephemeral — durable uploads/backups still need `DARKNOTE_DATA_DIR`
+on a persistent volume or object storage.
+
+Verified: `npx tsc --noEmit` clean, `npm test` **129/129** (new
+`tests/migration.test.ts` builds a v4-era database and proves it heals),
+`npm run build` passes. Reproduced the exact production error locally against a
+drifted database before the fix (500 `column "pending_delete" does not exist`)
+and confirmed 200 after it; `/sys` (read-only) also falls back and reports
+`storage: ok`.
+
 ## This pass — GitHub & file import, CRASH AND FIX, automatic synchronization
 
 ### Import

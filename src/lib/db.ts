@@ -127,12 +127,74 @@ async function createPglite(): Promise<DbClient> {
   return client;
 }
 
+/**
+ * Columns added to tables that a previous build already created.
+ *
+ * `create table if not exists` never alters a table that already exists, so an
+ * older database keeps its old column set. schema.sql is then executed against
+ * it and fails halfway — `imported_project_files_pending_delete_idx` references
+ * `pending_delete`, which the old table does not have:
+ *
+ *   column "pending_delete" does not exist   (db/schema.sql:854)
+ *
+ * Because that failure happens before the version marker is written, every
+ * later boot repeats it and every query fails. The repair therefore runs BEFORE
+ * schema.sql and independently of the version marker, so a database that is
+ * already marked current but drifted still heals itself.
+ */
+const LEGACY_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
+  ['imported_project_files', 'pending_delete', 'boolean not null default false'],
+  ['github_sync_jobs', 'message', 'text'],
+  ['editor_drafts', 'expected_bytes', 'bigint'],
+  ['editor_drafts', 'expected_sha256', 'text'],
+  ['editor_drafts', 'chunk_count', 'integer'],
+];
+
+async function tableExists(client: DbClient, table: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `select exists (
+       select 1 from information_schema.tables
+        where table_schema = current_schema() and table_name = $1
+     ) as present`,
+    [table],
+  );
+  return Boolean(result.rows[0]?.present);
+}
+
+/** Idempotent: adds the column only when the table exists without it. */
+async function addColumnIfMissing(
+  client: DbClient,
+  table: string,
+  column: string,
+  definition: string,
+): Promise<void> {
+  const result = await client.query<{ present: boolean }>(
+    `select exists (
+       select 1 from information_schema.columns
+        where table_schema = current_schema() and table_name = $1 and column_name = $2
+     ) as present`,
+    [table, column],
+  );
+  if (result.rows[0]?.present) return;
+  if (!(await tableExists(client, table))) return;
+  await client.query(`alter table ${table} add column if not exists ${column} ${definition}`);
+}
+
+async function repairLegacyColumns(client: DbClient): Promise<void> {
+  for (const [table, column, definition] of LEGACY_COLUMNS) {
+    await addColumnIfMissing(client, table, column, definition);
+  }
+}
+
 async function migrate(client: DbClient): Promise<void> {
   await client.query(
     `create table if not exists schema_migrations (version integer primary key, applied_at timestamptz not null default now())`,
   );
   const applied = await client.query<{ version: number }>(`select version from schema_migrations`);
   const versions = new Set(applied.rows.map((r) => Number(r.version)));
+  // Pre-flight repair: schema.sql creates indexes and constraints that reference
+  // columns only this file adds later, so an older table must be completed first.
+  await repairLegacyColumns(client);
   if (versions.has(SCHEMA_VERSION)) return;
   // schema.sql is idempotent (create ... if not exists). It must run on the same
   // connection/instance the application will query, otherwise the tables land in
@@ -147,19 +209,8 @@ async function migrate(client: DbClient): Promise<void> {
       `alter table connected_servers alter column max_file_bytes set default 16777216`,
     );
     await client.query(`update connected_servers set max_file_bytes = 16777216 where max_file_bytes = 524288`);
-    await client.query(`alter table editor_drafts add column if not exists expected_bytes bigint`);
-    await client.query(`alter table editor_drafts add column if not exists expected_sha256 text`);
-    await client.query(`alter table editor_drafts add column if not exists chunk_count integer`);
   }
-
-  // v5: columns added to existing tables. `create table if not exists` in
-  // schema.sql does not touch a table that already exists, so every column that
-  // an older deployment is missing must be added here explicitly. Both
-  // statements are idempotent and safe to run on a fresh database too.
-  await client.query(
-    `alter table imported_project_files add column if not exists pending_delete boolean not null default false`,
-  );
-  await client.query(`alter table github_sync_jobs add column if not exists message text`);
+  await repairLegacyColumns(client);
 
   // v3: Error Intelligence (error_intel_events) and BIGBROTHER (conversations,
   // messages, memory, assets, tutorials, usage). schema.sql is idempotent, so

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 
@@ -63,10 +64,48 @@ export const env = {
   appUrl: process.env.DARKNOTE_APP_URL ?? '',
 };
 
+let dataDirsReady = false;
+
+function mkdirPrivate(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+/** EROFS/EACCES/EPERM on a mounted container layer, or a cwd that does not exist. */
+function isReadOnlyFileSystemError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EROFS' || code === 'EACCES' || code === 'EPERM' || code === 'ENOENT';
+}
+
 export function ensureDataDirs(): void {
-  for (const dir of [env.dataDir, env.backupDir, env.uploadDir]) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (dataDirsReady) return;
+
+  let base = env.dataDir;
+  try {
+    mkdirPrivate(base);
+  } catch (error) {
+    if (!isReadOnlyFileSystemError(error)) throw error;
+    /**
+     * Serverless platforms mount the deployment read-only (on Vercel the working
+     * directory is `/var/task`), so `.data` cannot be created there and every
+     * storage call failed with `ENOENT … mkdir '/var/task/.data'`. Only the
+     * temporary directory is writable in that environment: use it and say so,
+     * rather than turning the whole console into a 500.
+     */
+    base = path.join(os.tmpdir(), 'darknote-data');
+    mkdirPrivate(base);
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[darknote] data directory ${env.dataDir} is not writable on this platform; using ${base} (ephemeral — persist uploads and backups elsewhere)`,
+    );
+    env.dataDir = base;
+    env.backupDir = path.join(base, 'backups');
+    env.uploadDir = path.join(base, 'uploads');
+    env.pgliteDir = path.join(base, 'pglite');
   }
+
+  mkdirPrivate(env.backupDir);
+  mkdirPrivate(env.uploadDir);
+  dataDirsReady = true;
 }
 
 let cachedSecret: string | null = null;
