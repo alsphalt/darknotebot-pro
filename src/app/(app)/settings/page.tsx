@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { KeyRound, Plug, Save, ShieldCheck, Trash2, UserPlus, Zap } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import { useServers, useToast } from "@/components/providers";
 import { InstallAppCard } from "@/components/pwa";
+import { GitHubSettings } from "@/components/projects/github-settings";
 import { Badge, ConfirmDialog, Empty, Panel, Spinner, Status } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost, errorMessage } from "@/lib/client";
 import { useApi } from "@/lib/use-api";
@@ -40,7 +41,20 @@ export default function SettingsPage() {
   const { push } = useToast();
   const settings = useApi<Settings>("/api/settings");
   const detail = useApi<ServerDetail>(activeId ? `/api/servers/${activeId}` : null);
-  const [tab, setTab] = useState<"servers" | "accounts" | "security">("servers");
+  const [tab, setTab] = useState<"servers" | "github" | "accounts" | "security">("servers");
+
+  // `?tab=github` is used by the OAuth callback and by the "open GitHub
+  // configuration" button in the import dialog.
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    if (requested === "github" || requested === "accounts" || requested === "security" || requested === "servers") {
+      setTab(requested);
+    }
+    const connected = new URLSearchParams(window.location.search).get("github");
+    const failure = new URLSearchParams(window.location.search).get("github_error");
+    if (connected === "connected") push("GitHub account connected", "ok");
+    if (failure) push(failure, "error");
+  }, [push]);
 
   const [form, setForm] = useState({ name: "", panelUrl: "", apiKey: "", serverIdentifier: "", rootPath: "/" });
   const [busy, setBusy] = useState<string | null>(null);
@@ -141,7 +155,7 @@ export default function SettingsPage() {
         description="Connections, permissions, deployment policy and platform configuration."
         actions={
           <div className="flex gap-1 rounded-lg border border-ink-700/70 bg-ink-900/60 p-1">
-            {(["servers", "accounts", "security"] as const).map((key) => (
+            {(["servers", "github", "accounts", "security"] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => setTab(key)}
@@ -315,6 +329,8 @@ export default function SettingsPage() {
           )}
         </div>
       )}
+
+      {tab === "github" && <GitHubSettings />}
 
       {tab === "accounts" && (
         <div className="space-y-4">

@@ -14,7 +14,7 @@ export interface DbClient extends DbConnection {
   transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 interface Cache {
   client?: Promise<DbClient>;

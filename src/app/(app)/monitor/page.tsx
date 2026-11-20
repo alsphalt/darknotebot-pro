@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Activity, AlertTriangle, Play, RefreshCw, Square } from "lucide-react";
+import { Activity, AlertTriangle, Play, RefreshCw, Square, Upload } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import { useServers, useToast } from "@/components/providers";
 import { Badge, ConfirmDialog, Empty, Panel, Spinner, Stat, Status } from "@/components/ui";
+import { ImportDialog } from "@/components/projects/import-dialog";
 import { apiPost, errorMessage } from "@/lib/client";
 import { useApi } from "@/lib/use-api";
 import { bytes, duration, relative } from "@/lib/format";
@@ -51,6 +52,7 @@ export default function MonitorPage() {
   const monitor = useApi<Monitor>(activeId ? `/api/monitor?serverId=${activeId}` : null, { refreshMs: 10_000 });
   const [confirm, setConfirm] = useState<null | "restart" | "start" | "stop">(null);
   const [busy, setBusy] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const data = monitor.data;
 
@@ -88,6 +90,9 @@ export default function MonitorPage() {
         description="Container state, WhatsApp connection, resources and console output — read straight from the panel."
         actions={
           <>
+            <button className="btn-ghost" onClick={() => setImportOpen(true)}>
+              <Upload className="h-3.5 w-3.5" /> Upload a file
+            </button>
             <button className="btn-ghost" onClick={() => void monitor.refresh()} disabled={monitor.loading}>
               {monitor.loading ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />} Refresh
             </button>
@@ -230,6 +235,8 @@ export default function MonitorPage() {
           </div>
         </Panel>
       </div>
+
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
 
       <ConfirmDialog
         open={confirm !== null}

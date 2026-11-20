@@ -28,7 +28,10 @@ files.
 | **Backups & Versions** | Private content-addressed store + panel backups |
 | **Download Center** | Serves freshly-read production bytes with a verified SHA-256 |
 | **Terminal & Logs** | One persistent authenticated console websocket per server, relayed over SSE; command sending gated behind confirmation |
-| **Admin Settings** | Accounts, roles, capability probe, security posture, install status |
+| **CRASH AND FIX 👷‍♂️** | Searches the imported projects' real JavaScript for `case 'cmd':` blocks, extracts only that case with an AST walk, edits it in Monaco and writes it back with hash guards, validation, version history and rollback |
+| **Projects & Imports** | Every imported project: source (GitHub or file), branch, pending changes, sync state, last commit — browse and edit its files, remove the working copy |
+| **GitHub import** | LIVE MONITORING → *Upload a file* → **File Upload** (ZIP or files) or **GitHub Import** (configured repository, or a searchable list of repositories the connected token can see) |
+| **Admin Settings** | Accounts, roles, capability probe, security posture, install status, and the **GitHub connection** (token or OAuth App, specific repository, sync preferences, TEST CONNECTION) |
 | **Installable app (PWA)** | Manifest, service worker and install prompts for a standalone window on desktop, Android and iOS, with an offline fallback page |
 
 ---
@@ -199,6 +202,40 @@ File relationships come from a real import graph: relative `require`/`import`
 specifiers are resolved through `.js/.cjs/.mjs/.json/index.*` candidates, so a file
 shows what it imports, what imports it, and which references are broken.
 
+## GitHub import and synchronization
+
+Repositories are imported **through the GitHub API** — nothing is downloaded by hand and nothing is
+written to the deployment filesystem, so this works on Vercel/Neon as well as on a long-running
+server. The working copy lives in PostgreSQL (`imported_projects`, `imported_project_files`).
+
+- **Connection.** A personal access token (`repo` + `read:user`) is verified against `GET /user`
+  *before* it is stored, encrypted with AES-256-GCM under `DARKNOTE_SECRET`. An OAuth App
+  authorization-code flow is also supported: paste the client id/secret, press *Authorize with
+  GitHub*, and the callback exchanges the code server-side. A GitHub **email address is never used as
+  authentication** — only a token GitHub resolves to an account grants access. No route returns the
+  token, and only the last four characters are shown as a hint.
+- **Import.** `GET /user/repos` is scoped by the token, so the list can only contain repositories that
+  account may access. A recursive tree read plus one blob per file stores the text (≤ 2 MB per file)
+  and the git blob sha of every file; dependencies, build output, `.env`-style credential paths and
+  binaries are recorded as metadata only and never rewritten.
+- **Editing.** CRASH AND FIX replaces exactly one AST range, re-parses the whole file and writes with
+  a conditional `UPDATE … WHERE sha256 = <what you loaded>`. A concurrent edit loses cleanly.
+- **Synchronization.** A save marks the file dirty and schedules one job per project at *now + 5 s*;
+  every further save moves that deadline, so a burst of edits becomes one commit. When it fires the
+  worker compares the branch head and every touched blob sha with what was imported, creates
+  blobs → tree → commit through the Git Data API, updates the ref **without force**, then reads the ref
+  back before reporting `GITHUB SYNCHRONIZED SUCCESSFULLY`. A moved branch or a changed file is a
+  **conflict**: the remote is never overwritten, the local edit is kept, and you can rebase onto the
+  remote head or discard the local change.
+- **Branches.** The default branch is detected and remembered at import, another branch can be chosen
+  in the import dialog, and pushes always target that same branch. Nothing is pushed to a branch the
+  project was not imported from.
+- **Queue.** The debounce is a real row (`github_sync_jobs`), drained by an in-process timer on Node
+  deployments and by `POST /api/github/sync/tick` (called by the pending-project views) where timers
+  are not reliable.
+
+---
+
 ## Large files
 
 The old build refused anything above 2 MB. That limit came from a 512 KB database default multiplied
@@ -273,7 +310,10 @@ src/lib/files/             remote file operations, guarded writes, backups, vali
 src/lib/services/          discovery, deploy, console, cases, replace, downloads
 src/lib/sync.ts            reconciliation state, conflicts, resolution
 src/lib/security/paths.ts  path confinement, secret blocking, exclusion rules
-db/schema.sql              23 tables (Neon + embedded PGlite for local evaluation)
+src/lib/projects/          imported-project storage, safe ZIP/GitHub import, import jobs
+src/lib/crashfix/          case search + guarded case save, history and rollback
+src/lib/github/            REST client, encrypted credentials, OAuth, repo discovery, sync queue
+db/schema.sql              31 tables (Neon + embedded PGlite for local evaluation)
 ```
 
 - **Pterodactyl is the source of truth.** Neon stores administration, indexes, hashes, versions,
@@ -292,6 +332,9 @@ db/schema.sql              23 tables (Neon + embedded PGlite for local evaluatio
   every mutating request; per-IP/per-email login throttling.
 - Roles: `owner` → `admin` → `operator` → `viewer`, with per-server grants.
 - WhatsApp session folders, `.env` files, private keys and `creds.json` are blocked from reading,
-  editing, versioning and export — including from the Download Center.
+  editing, versioning and export — including from the Download Center. The same rules apply to
+  imported projects: credential-shaped paths are never stored, listed or pushed.
+- GitHub credentials follow the same envelope as panel keys: verified before storage, AES-256-GCM at
+  rest, never logged, never returned, replaceable and disconnectable from Admin Settings.
 - Credentials shared in chat should be rotated after use: **the GitHub token and the Neon password
   in this project's history should both be considered exposed.**

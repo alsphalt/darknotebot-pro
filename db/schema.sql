@@ -601,3 +601,160 @@ create table if not exists bigbrother_usage (
   created_at  timestamptz not null default now()
 );
 create index if not exists bigbrother_usage_created_idx on bigbrother_usage (created_at desc);
+
+-- ---------------------------------------------------------------------------
+-- 26. GitHub connection, imported projects, import jobs, CRASH AND FIX history
+-- and the debounced GitHub synchronization queue.
+--
+-- Imported project contents live here, not on a serverless filesystem: a Vercel
+-- lambda cannot write to the deployment source, so the panel keeps the working
+-- copy in PostgreSQL and pushes changes through the GitHub API.
+-- ---------------------------------------------------------------------------
+create table if not exists github_connection (
+  id                        text primary key,
+  auth_mode                 text,                        -- token | oauth
+  token_encrypted           text,
+  token_hint                text,
+  token_scopes              jsonb not null default '[]'::jsonb,
+  account_login             text,
+  account_name              text,
+  account_id                text,
+  account_avatar            text,
+  repo_owner                text,
+  repo_name                 text,
+  repo_branch               text,
+  oauth_client_id           text,
+  oauth_client_secret_encrypted text,
+  oauth_state               text,
+  oauth_state_expires_at    timestamptz,
+  auto_sync                 boolean not null default true,
+  sync_delay_seconds        integer not null default 5,
+  connected_at              timestamptz,
+  last_verified_at          timestamptz,
+  last_test_at              timestamptz,
+  last_test_ok              boolean,
+  last_error                text,
+  updated_at                timestamptz not null default now(),
+  updated_by                text
+);
+
+create table if not exists imported_projects (
+  id                  text primary key,
+  name                text not null,
+  description         text,
+  source              text not null,                 -- github | upload
+  source_label        text,                          -- archive name or owner/repo
+  github_owner        text,
+  github_repo         text,
+  github_branch       text,
+  github_default_branch text,
+  github_private      boolean not null default false,
+  base_commit_sha     text,                          -- remote head the local copy is based on
+  last_pushed_sha     text,
+  last_commit_sha     text,
+  last_commit_url     text,
+  last_commit_message text,
+  sync_enabled        boolean not null default true,
+  sync_status         text not null default 'idle',   -- idle | pending | syncing | synced | failed | conflict | disabled
+  sync_error          text,
+  last_sync_at        timestamptz,
+  status              text not null default 'ready',  -- importing | ready | import_failed | removed
+  status_message      text,
+  file_count          integer not null default 0,
+  text_file_count     integer not null default 0,
+  total_bytes         bigint not null default 0,
+  created_by          text,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+create index if not exists imported_projects_source_idx on imported_projects (source, created_at desc);
+create index if not exists imported_projects_repo_idx on imported_projects (github_owner, github_repo);
+create unique index if not exists imported_projects_active_repo_key
+  on imported_projects (lower(github_owner), lower(github_repo), lower(coalesce(github_branch, '')))
+  where github_repo is not null and status <> 'removed';
+
+create table if not exists imported_project_files (
+  id            text primary key,
+  project_id    text not null references imported_projects(id) on delete cascade,
+  path          text not null,
+  name          text not null,
+  extension     text,
+  size_bytes    bigint not null default 0,
+  sha256        text,
+  content       text,
+  is_text       boolean not null default true,
+  content_omitted boolean not null default false,
+  remote_sha    text,                                -- git blob sha at import/last push
+  dirty         boolean not null default false,
+  changed_at    timestamptz,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create unique index if not exists imported_project_files_path_key on imported_project_files (project_id, path);
+create index if not exists imported_project_files_dirty_idx on imported_project_files (project_id, dirty);
+create index if not exists imported_project_files_ext_idx on imported_project_files (project_id, extension);
+
+create table if not exists project_import_jobs (
+  id            text primary key,
+  project_id    text,
+  source        text not null,                       -- github | upload
+  status        text not null default 'running',     -- running | succeeded | failed
+  phase         text,
+  total_files   integer not null default 0,
+  fetched_files integer not null default 0,
+  total_bytes   bigint not null default 0,
+  skipped_files integer not null default 0,
+  message       text,
+  error         text,
+  detail        jsonb not null default '{}'::jsonb,
+  created_by    text,
+  started_at    timestamptz not null default now(),
+  finished_at   timestamptz
+);
+create index if not exists project_import_jobs_started_idx on project_import_jobs (started_at desc);
+
+create table if not exists crash_fix_history (
+  id               text primary key,
+  project_id       text not null references imported_projects(id) on delete cascade,
+  file_id          text,
+  file_path        text not null,
+  case_name        text not null,
+  before_code      text not null,
+  after_code       text not null,
+  file_sha_before  text,
+  file_sha_after   text,
+  action           text not null default 'edit',      -- edit | rollback
+  status           text not null default 'saved',     -- saved | failed | rolled_back
+  error            text,
+  user_id          text,
+  created_at       timestamptz not null default now()
+);
+create index if not exists crash_fix_history_project_idx on crash_fix_history (project_id, created_at desc);
+
+create table if not exists github_sync_jobs (
+  id            text primary key,
+  project_id    text not null references imported_projects(id) on delete cascade,
+  status        text not null default 'pending',      -- pending | running | succeeded | failed | conflict
+  not_before    timestamptz not null default now(),   -- debounce deadline
+  attempts      integer not null default 0,
+  files         jsonb not null default '[]'::jsonb,
+  trigger       text not null default 'auto',         -- auto | manual | retry
+  last_error    text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  finished_at   timestamptz
+);
+create unique index if not exists github_sync_jobs_one_pending_per_project
+  on github_sync_jobs (project_id) where status = 'pending';
+create index if not exists github_sync_jobs_due_idx on github_sync_jobs (status, not_before);
+
+create table if not exists github_sync_events (
+  id          bigserial primary key,
+  project_id  text not null references imported_projects(id) on delete cascade,
+  level       text not null default 'info',           -- info | success | error | warn
+  phase       text,
+  message     text not null,
+  detail      jsonb not null default '{}'::jsonb,
+  created_at  timestamptz not null default now()
+);
+create index if not exists github_sync_events_project_idx on github_sync_events (project_id, id desc);

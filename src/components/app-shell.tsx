@@ -14,6 +14,8 @@ import {
   FolderTree,
   FolderSearch,
   Gauge,
+  HardHat,
+  Github,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -38,6 +40,8 @@ import { ErrorReporter } from "./error-reporter";
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/monitor", label: "Live Monitor", icon: Gauge },
+  { href: "/crash-and-fix", label: "CRASH AND FIX", icon: HardHat },
+  { href: "/projects", label: "Projects & Imports", icon: Github },
   { href: "/discovery", label: "Server Discovery", icon: Radar },
   { href: "/files", label: "File Manager", icon: FolderTree },
   { href: "/explorer", label: "Project Explorer", icon: FolderSearch },

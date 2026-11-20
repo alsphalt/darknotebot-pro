@@ -1,9 +1,97 @@
 # Darknote Control Center — build status
 
-Last updated: 2026-11-16 · branch `main`
+Last updated: 2026-11-20 · branch `main`
 
+## This pass — GitHub & file import, CRASH AND FIX, automatic synchronization
 
-## This pass
+### Import
+
+- **LIVE MONITORING → Upload a file** opens a compact chooser: **📂 File Upload** or **🐙 GitHub
+  Import**. Nothing is a mock-up: both paths write real rows and report real counters.
+- **File upload** accepts a ZIP or individual files (64 MB per file, 128 MB extracted, 800 files).
+  Entries that are absolute, contain `..` or a NUL byte are rejected; credential-shaped paths and
+  `node_modules`/`dist`/`.next`-style folders are skipped; a single wrapping folder is stripped so the
+  project keeps its own structure. Every text file keeps its original bytes, filename and folder.
+- **GitHub import** reads the repository through the GitHub API (`GET /user/repos` for the account
+  list, recursive tree + blobs for the contents) and stores text inline plus each file's git blob sha.
+  A specific repository configured in Admin Settings is offered directly (scenario A); otherwise the
+  account's repositories are listed with search and paging (scenario B); with nothing configured the
+  dialog says **GITHUB NOT CONNECTED** and links to the settings section (scenario C).
+- Import progress is a real job row (`project_import_jobs`) polled by the dialog, so the bar reflects
+  files actually fetched and stored.
+
+### GitHub connection (Admin Settings → GitHub)
+
+- A token is verified against `GET /user` before it is stored, then encrypted with AES-256-GCM under
+  `DARKNOTE_SECRET`; only `••••••••abcd` is ever displayed, no route returns it, and it is never
+  logged or written into project files.
+- An OAuth App authorization-code flow is implemented (`/api/github/oauth/start` → callback, single-use
+  state, 10-minute expiry, secret and code exchanged server-side). It needs a registered OAuth App;
+  the token path works without one.
+- A GitHub **email address is not authentication** anywhere in the flow.
+- Connection status (connected/disconnected), repository configured, token configured, failure reason,
+  **TEST CONNECTION** (token → account → repository list → configured repository → branch) and
+  disconnect/replace are all present.
+- Sync preferences: enable/disable automatic synchronization and the debounce delay (default 5 s,
+  2–120 s), with the pending list and a manual push per project.
+
+### CRASH AND FIX 👷‍♂️
+
+- `/crash-and-fix`: animated three-colour terminal (blue scanning, green success, red failure) with a
+  3 s initialisation and a ~5 s scan window. The pacing is presentation only — every result line comes
+  from the API response (`filesScanned`, `casesExamined`, `durationMs`), and a search that takes longer
+  simply keeps running.
+- The search parses the imported projects' JavaScript with acorn and returns **only** matching
+  `case '<name>':` blocks, with exact start/end offsets. Nested switches, block-scoped cases and
+  neighbouring cases are handled; no file name, folder or surrounding code is sent to the browser.
+- Edit in Monaco (line numbers, undo/redo, search, unsaved indicator) and **SAVE**:
+  file-hash check → case-offset/content check → fragment parse → whole-file parse → conditional
+  `UPDATE … WHERE sha256` → re-read → history entry. A stale file, a moved case, a syntax error or a
+  case-label change is refused with a readable reason and nothing is written.
+- Every save records `crash_fix_history` (before/after code, both file hashes, status) and the panel
+  can restore any of those versions through the same guarded path.
+
+### Synchronization
+
+- A save marks the file dirty and upserts one pending job at `now + delay`; further saves move the
+  deadline, so 5 seconds of inactivity produce one commit.
+- The worker compares the branch head and every touched blob sha with what was imported, then creates
+  blobs → tree → commit and patches the ref **without force**. It reads the ref back (and up to five
+  file contents) before reporting success, so `GITHUB SYNCHRONIZED SUCCESSFULLY` only appears after
+  GitHub confirms the commit.
+- A moved branch or a changed file is a **conflict**: nothing remote is overwritten, the local edit is
+  kept, and the panel offers *rebase & push* (our changed files on top of the remote tree) or
+  *discard local* (re-read the files from GitHub).
+- The queue is drained by an in-process timer (`instrumentation.ts`, Node runtime) and by
+  `POST /api/github/sync/tick`, which the pending views call — so it also works where a timer cannot
+  run. `DARKNOTE_DISABLE_GITHUB_WORKER=1` turns the timer off (tests, e2e).
+
+### Verified in this pass
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | **111/111** (`projects` incl. 12 new cases, plus `pipeline`, `editor`, `explorer`, `routes`, `monitor-editor`, `pwa`, `error-intelligence`, `bigbrother`, `llm-loop`) |
+| `npm run build` | passes; `/crash-and-fix`, `/projects` and the new API routes are in the route table |
+| `node tests/e2e-projects.mjs` | **25/25** against `next start` + a protocol-accurate GitHub double: token rejected when wrong, repository imported, case found and saved, stale save refused (409), push confirmed and the ref really moved, `.env` never imported, ZIP traversal entry rejected, three pages render |
+| GitHub double | Real git blob SHAs (`sha1("blob <len>\0<content>")`), ref only advances through a commit, `force:false` enforced, per-file contents read back after the push |
+| Conflict path | colleague push → local save → `conflict`, remote head untouched, local text preserved, then rebase-and-push lands both |
+
+### Not verified here
+
+- **A real GitHub account.** The end-to-end run used a protocol-accurate double; the client speaks the
+  documented REST/Git Data API and maps 401/403/404/422/429, but the first run against github.com with
+  a real token is still yours to make (Admin Settings → TEST CONNECTION).
+- **The OAuth App flow.** It needs a registered OAuth App (client id + secret); the code path is
+  implemented and type-checked but no real client id existed in this environment.
+- **A physical phone.** Layout is mobile-first and the dialog is a bottom sheet, verified at HTML and
+  CSS level only.
+- **Very large repositories.** A truncated recursive tree is refused with a clear message rather than
+  importing a partial project; binary and >2 MB files are metadata-only by design.
+
+---
+
+## Previous pass
 
 ### Installable app — PWA (new)
 
