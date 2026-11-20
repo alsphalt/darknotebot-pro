@@ -568,6 +568,42 @@ html[data-christmas="on"] .panel {
 }
 
 /* ---------------------------------------------------------------- intro */
+
+/*
+ * Boot shield for installed apps. It is server-rendered, so the very first
+ * paint of a PWA launch is already the intro backdrop instead of the console.
+ * Browser tabs never see it. Released by the provider once the intro takes
+ * over; the 9s animation is a safety net if hydration never happens.
+ */
+.xmas-boot {
+  display: none;
+}
+
+@media (display-mode: standalone), (display-mode: window-controls-overlay), (display-mode: fullscreen) {
+  .xmas-boot {
+    display: grid;
+    position: fixed;
+    inset: 0;
+    z-index: 119;
+    background:
+      radial-gradient(900px 600px at 50% 40%, rgba(12, 16, 28, 0.96), rgba(3, 4, 9, 0.99) 70%),
+      #03040a;
+    animation: xmas-boot-lift 240ms ease-out 9s forwards;
+  }
+}
+
+html[data-xmas-boot="done"] .xmas-boot {
+  display: none;
+}
+
+@keyframes xmas-boot-lift {
+  to {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+
 .xmas-intro {
   position: fixed;
   inset: 0;

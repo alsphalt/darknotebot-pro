@@ -73,6 +73,31 @@ export function serializePrefs(prefs: ChristmasPrefs): string {
   });
 }
 
+/**
+ * True when the console is running as an installed app (home screen, dock or
+ * standalone window) rather than in a browser tab.
+ *
+ * The introduction is a launch moment for the installed app: closing it and
+ * opening it again must show the intro again. A browser tab keeps the
+ * first-run-only behaviour.
+ */
+export function isStandaloneLaunch(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (window.matchMedia?.('(display-mode: standalone)').matches) return true;
+    if (window.matchMedia?.('(display-mode: window-controls-overlay)').matches) return true;
+    if (window.matchMedia?.('(display-mode: fullscreen)').matches) return true;
+  } catch {
+    /* matchMedia can be blocked; fall through to the iOS flag */
+  }
+  return (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
+/** The appearance mode already chosen on this device, before any network call. */
+export function storedMode(stored: Record<string, unknown> | null, server: ServerAppearance): ChristmasMode {
+  return normalizeMode((stored ?? {}).mode, normalizeMode(server.christmasEffects));
+}
+
 /** True when the operating system asks for less motion. */
 export function prefersReducedMotion(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;

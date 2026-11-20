@@ -6,10 +6,12 @@ import { apiGet } from "@/lib/client";
 import {
   CHRISTMAS_STORAGE_KEY,
   DEFAULT_APPEARANCE,
+  isStandaloneLaunch,
   mergePrefs,
   parseStored,
   prefersReducedMotion,
   serializePrefs,
+  storedMode,
   type ChristmasMode,
   type ChristmasPrefs,
   type ServerAppearance,
@@ -47,6 +49,16 @@ function readLocal(): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Lifts the pre-hydration boot shield (see `.xmas-boot` in globals.css). The
+ * shield only renders for installed apps: it covers the console until the
+ * introduction has taken over, so the dashboard never paints ahead of it.
+ */
+function releaseBootShield(): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset.xmasBoot = "done";
 }
 
 function persist(prefs: ChristmasPrefs): void {
@@ -94,11 +106,45 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
     root.dataset.motion = prefs.mode === "reduced" ? "reduced" : "full";
   }, [prefs.mode]);
 
-  // First-run introduction.
+  /**
+   * Installed-app launch: the introduction plays every time the app is opened,
+   * and it starts before the console is reachable. This runs on mount — not
+   * after the policy request — so nothing is gated behind a network round trip.
+   *
+   * `introSeen` is deliberately ignored here: it only marks the browser's
+   * first-run moment. Turning Christmas effects off, or asking for reduced
+   * motion, still wins.
+   */
+  useEffect(() => {
+    if (!isStandaloneLaunch()) {
+      releaseBootShield();
+      return;
+    }
+    if (prefersReducedMotion() || storedMode(readLocal(), DEFAULT_APPEARANCE) === "off") {
+      releaseBootShield();
+      return;
+    }
+    setIntroOpen(true);
+  }, []);
+
+  // The policy can still say the effects are off. The launch intro is decided
+  // before that response arrives, so honour it here instead of showing a
+  // festive intro on an app that has Christmas turned off.
+  useEffect(() => {
+    if (!introOpen || prefs.mode !== "off") return;
+    setIntroOpen(false);
+    setLeaving(false);
+    releaseBootShield();
+  }, [introOpen, prefs.mode]);
+
+  // First-run introduction (browser tabs; installed launches are handled above).
   useEffect(() => {
     if (!ready) return;
-    if (!prefs.intro || prefs.introSeen || prefs.mode === "off") return;
-    if (prefersReducedMotion()) return;
+    if (isStandaloneLaunch()) return;
+    if (!prefs.intro || prefs.introSeen || prefs.mode === "off" || prefersReducedMotion()) {
+      releaseBootShield();
+      return;
+    }
     setIntroOpen(true);
   }, [prefs.intro, prefs.introSeen, prefs.mode, ready]);
 
@@ -106,6 +152,8 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
     if (!introOpen) return;
     timer.current = window.setTimeout(() => {
       setLeaving(true);
+      // Reveal the console underneath while the intro fades out, not after it.
+      releaseBootShield();
       timer.current = window.setTimeout(() => {
         setIntroOpen(false);
         setLeaving(false);
@@ -124,6 +172,7 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
   const dismissIntro = useCallback(() => {
     if (timer.current) window.clearTimeout(timer.current);
     setLeaving(true);
+    releaseBootShield();
     window.setTimeout(() => {
       setIntroOpen(false);
       setLeaving(false);
@@ -162,6 +211,8 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <ChristmasContext.Provider value={value}>
+      {/* Installed apps paint this before hydration; it is display:none in a tab. */}
+      <div className="xmas-boot" aria-hidden="true" />
       {children}
       {prefs.mode !== "off" && prefs.snow && prefs.mode !== "reduced" ? <SnowLayer /> : null}
       {introOpen ? <ChristmasIntro leaving={leaving} onSkip={dismissIntro} /> : null}

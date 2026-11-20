@@ -17,7 +17,7 @@
  * are removed on activate.
  */
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const STATIC_CACHE = `darknote-static-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline";
 
