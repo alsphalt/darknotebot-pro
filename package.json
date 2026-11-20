@@ -16,11 +16,17 @@
     "postinstall": "node scripts/copy-monaco.mjs",
     "predev": "node scripts/copy-monaco.mjs",
     "prebuild": "node scripts/copy-monaco.mjs",
-    "prestart": "node scripts/copy-monaco.mjs"
+    "prestart": "node scripts/copy-monaco.mjs",
+    "db:migrate": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/migrate.ts",
+    "db:status": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/migrate.ts -- --status",
+    "db:maintenance": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts",
+    "db:backup": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts --backup",
+    "db:restore": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts restore"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",
     "@monaco-editor/react": "4.7.0",
+    "@neondatabase/serverless": "^1.2.1",
     "acorn": "8.15.0",
     "acorn-walk": "8.3.4",
     "bcryptjs": "3.0.2",
@@ -45,6 +51,7 @@
     "@types/react-dom": "19.1.7",
     "@types/ws": "8.18.1",
     "autoprefixer": "10.4.21",
+    "embedded-postgres": "^18.7.0-beta.19",
     "postcss": "8.5.6",
     "tailwindcss": "3.4.17",
     "typescript": "5.9.2"

@@ -268,6 +268,58 @@ export class GitHubClient {
     );
   }
 
+  /** Repository hooks. Used to register the DARKNOTE webhook on connect. */
+  async listHooks(owner: string, repo: string): Promise<Array<{ id: number; config?: { url?: string } }>> {
+    return this.request<Array<{ id: number; config?: { url?: string } }>>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`,
+    );
+  }
+
+  async createHook(
+    owner: string,
+    repo: string,
+    options: { url: string; secret: string; events?: string[] },
+  ): Promise<{ id: number }> {
+    return this.request<{ id: number }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`, {
+      method: 'POST',
+      body: {
+        name: 'web',
+        active: true,
+        events: options.events ?? ['push'],
+        config: {
+          url: options.url,
+          content_type: 'json',
+          secret: options.secret,
+          insecure_ssl: '0',
+        },
+      },
+    });
+  }
+
+  async updateHook(
+    owner: string,
+    repo: string,
+    hookId: number,
+    options: { url: string; secret: string; events?: string[] },
+  ): Promise<{ id: number }> {
+    return this.request<{ id: number }>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks/${hookId}`,
+      {
+        method: 'PATCH',
+        body: {
+          active: true,
+          events: options.events ?? ['push'],
+          config: {
+            url: options.url,
+            content_type: 'json',
+            secret: options.secret,
+            insecure_ssl: '0',
+          },
+        },
+      },
+    );
+  }
+
   /** Full recursive tree. Truncated responses are reported by `truncated`. */
   async getTree(owner: string, repo: string, treeSha: string): Promise<{ tree: GitHubTreeEntry[]; truncated: boolean }> {
     return this.request<{ tree: GitHubTreeEntry[]; truncated: boolean }>(

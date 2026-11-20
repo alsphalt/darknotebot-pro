@@ -17,7 +17,14 @@
  * are removed on activate.
  */
 
-const CACHE_VERSION = "v2";
+/*
+ * v3 — the worker is byte-for-byte the same strategy as v2; the version was
+ * bumped because the build output changed (new chunk graph), and an old cache
+ * holding stale hashed chunks is the classic "the fix did not arrive on my
+ * phone" report. On activate the previous cache is deleted, so a device that
+ * upgrades takes the new assets exactly once.
+ */
+const CACHE_VERSION = "v3";
 const STATIC_CACHE = `darknote-static-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline";
 

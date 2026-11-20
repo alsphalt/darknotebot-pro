@@ -17,7 +17,14 @@ const nextConfig: NextConfig = {
   // Pin the tracing root so Next writes and reads the same .next directory.
   outputFileTracingRoot: __dirname,
   poweredByHeader: false,
-  serverExternalPackages: ["ws", "pg", "@prisma/client", "@aws-sdk/client-s3", "@electric-sql/pglite"],
+  serverExternalPackages: [
+    "ws",
+    "pg",
+    "@neondatabase/serverless",
+    "@prisma/client",
+    "@aws-sdk/client-s3",
+    "@electric-sql/pglite",
+  ],
   async headers() {
     return [
       {

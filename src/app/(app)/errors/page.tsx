@@ -365,7 +365,7 @@ export default function ErrorsPage() {
         {errors.map((error) => (
           <article
             key={error.id}
-            className="panel cursor-pointer px-3.5 py-3 transition hover:border-ink-600/80"
+            className="panel cv-auto-tall cursor-pointer px-3.5 py-3 transition hover:border-ink-600/80"
             onClick={() => setOpenId(error.id)}
           >
             <div className="flex flex-wrap items-center gap-1.5">

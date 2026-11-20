@@ -300,6 +300,134 @@ content — offline you get the shell and the offline page, not a stale dashboar
 
 ---
 
+## Database (Neon PostgreSQL)
+
+Neon is the only persistent store. Every account, session, imported project, file record, conversation,
+deployment, error and audit row lives there; nothing important is kept in process memory or in the
+browser. (The embedded PGlite database still exists, but only for local evaluation and the test suite —
+`/api/health` reports which driver is live.)
+
+### Connection
+
+```bash
+# Neon dashboard → Connection details → "Pooled connection" (PgBouncer, transaction mode)
+DATABASE_URL=postgresql://user:password@ep-xxxx-pooler.eu-central-1.aws.neon.tech/darknote?sslmode=require
+DATABASE_SSL=require          # require | no-verify | disable
+DARKNOTE_DB_DRIVER=auto       # auto | postgres | neon | pglite
+DARKNOTE_DB_POOL=1            # optional; 1 on serverless, 8 for a long-running `next start`
+```
+
+- `postgres` (default) is node-postgres over TCP/TLS — it works against the pooled endpoint, a
+  self-hosted server and CI.
+- `neon` uses `@neondatabase/serverless` over a WebSocket (no TCP socket). `auto` selects it only for a
+  `*.neon.tech` host on a serverless platform.
+- On Vercel the pool is capped at **one** connection per instance with `allowExitOnIdle`, because the
+  pooled endpoint multiplexes many clients onto few server connections — a large local pool only burns
+  the project's connection limit.
+- A dropped idle connection is logged, never fatal, and a single transient failure
+  (`ECONNRESET`, `57P01`, `Connection terminated`, …) is retried once with backoff.
+- Credentials are read from `DATABASE_URL` on the server only. No route returns them, `dbHealth()`
+  reports `host/database` and never the password, and the health endpoint never echoes the URL.
+
+### Migrations
+
+| Command | What it does |
+|---|---|
+| `npm run db:status` | Prints applied / pending / drifted migrations. Changes nothing. |
+| `npm run db:migrate` | Takes a logical backup (when the database has rows), then applies everything pending. |
+| `npm run db:migrate -- --dry-run` | Lists what would be applied. |
+| `npm run db:maintenance` | Health report → retention prune → row counts. |
+| `npm run db:backup` | Full logical backup to `.data/backups/database/<stamp>-<label>/`. |
+| `npm run db:restore -- <dir> [--replace]` | Restores a backup. Refuses a populated database unless `--replace`. |
+
+- `db/schema.sql` is the baseline (`0001_baseline`); every later change is a file in `db/migrations/`
+  applied in filename order and recorded in `db_migrations` with a SHA-256 checksum.
+- Migrations run under a PostgreSQL advisory lock, so ten serverless instances cold-starting at once
+  cannot race.
+- The app **verifies** the registry on boot instead of migrating blindly. `DARKNOTE_DB_MIGRATE=never`
+  refuses to start with a pending migration (use that in production with a deploy step);
+  `DARKNOTE_DB_MIGRATE=always` restores the migrate-on-boot behaviour.
+- A database created by an older build (rows in `schema_migrations`, no `db_migrations`) is *adopted*:
+  the baseline is recorded without re-running it, and later migrations are applied on top.
+- Editing a released numbered migration is refused (checksum drift). The baseline is the exception —
+  it is `create … if not exists` end to end, so a cosmetic edit is re-applied once instead of blocking
+  a deploy.
+
+### Vercel
+
+1. `DATABASE_URL` (pooled) + `DARKNOTE_SECRET` in *Project → Settings → Environment Variables*
+   (Production **and** Preview).
+2. Add `npm run db:migrate` as a step in the build command, or run it once from your machine against
+   the production URL. Keep `DARKNOTE_DB_MIGRATE=never` in the runtime environment so a request never
+   starts a migration.
+3. Verify with `GET /api/health`: it returns `200` only when the database answers, the backup store is
+   writable and no migration is pending; otherwise `503` with the reason (`databaseError`).
+4. Uploads and backups live on the local filesystem, which is **ephemeral on Vercel**. Point
+   `DARKNOTE_DATA_DIR` at a persistent volume, or treat the backup store as a cache — the database is
+   the durable record.
+
+### Backup, retention and recovery
+
+- Backups are NDJSON, one gzip file per table plus `manifest.json` (row count + SHA-256 per table),
+  streamed in pages of 500 rows so a large table is never materialised in memory at once.
+- Retention is explicit and opt-in: failed logins 30 days, resolved error events 120 days, download
+  history 90 days, GitHub sync events 60 days, health reports 30 days; audit logs are kept forever
+  unless `DARKNOTE_RETAIN_AUDIT_DAYS` is set. Every run prints the rows it actually deleted.
+- Recovery: `npm run db:restore -- .data/backups/database/<dir> --replace`, then `npm run db:status`.
+
+### What the database stores (and what it does not)
+
+Structured records only: accounts, roles, sessions, passkeys metadata, preferences, servers and their
+encrypted panel keys, indexes and hashes, drafts and versions, imported projects and their **file
+metadata + text content**, deployments, errors, audit logs, conversations and AI settings, GitHub
+connection metadata and repository configuration, health reports. Large binaries and the bot's real
+production files stay on Pterodactyl; project files are stored per owner with a `(project_id, path)`
+key, and a route always filters by the authenticated user (see `assertServerAccess` and the project
+repository) — one account can never read another account's project, conversation or credential.
+
+---
+
+## Android stability ("Aw, Snap")
+
+`Aw, Snap!` is Chromium killing the renderer, almost always for memory or GPU pressure. There is no
+exception to log, so the fix has two halves: stop the app spending memory it does not need, and make the
+next death measurable.
+
+### What the client does now
+
+| Area | Change |
+|---|---|
+| Response cache | Bounded by **retained bytes** (3 MB) as well as entries, oldest dropped first. A `/api/monitor` payload carries the console tail, so counting entries alone pinned megabytes for the tab's lifetime. |
+| Polling | Every `useApi(refreshMs)` timer stops on `visibilitychange → hidden`, on `offline`, and restarts with one fresh read when the tab returns. |
+| Console | Lines are buffered and flushed 4×/s instead of a React state update per line; the tail is capped at 600 rows; the SSE stream is closed while the tab is hidden. |
+| Monitor payload | 120 console lines by default (`?lines=` up to 400), measured server-side; the terminal asks for the long tail, every other page does not. |
+| Long lists | `content-visibility: auto` on console lines, file rows, error cards and monitor output: off-screen rows are not laid out or painted. |
+| Backdrop blur | Disabled below 1024 px, under `prefers-reduced-transparency`, and in the app's own reduced mode. A fixed sidebar with `backdrop-filter: blur()` re-blurs the page on every scroll frame — the most expensive thing on a phone screen. |
+| BIGBROTHER ambient | The two 18 px-blurred word layers and the `mix-blend-mode` grain are dropped below 768 px; the remaining cycle slows to 34 s. |
+| Animations | Paused with `animation-play-state` while the document is hidden (the sentinel sets `data-doc-hidden`), and removed entirely for `prefers-reduced-motion` and the in-app reduced mode. Snow already stops when hidden, respects reduced motion, and caps particles by viewport area. |
+| Error containment | Route-level `error.tsx` + a per-page `ErrorBoundary` inside the shell + `global-error.tsx`: a failing panel keeps the navigation, shows the real message, and offers a retry that remounts only that subtree. |
+
+### Crash diagnostics
+
+`src/lib/perf/sentinel.ts` writes a small heartbeat to `localStorage` (one write per 20 s, only while
+visible) with the page, JavaScript heap, renderer limit, long-task count and session age. If the next
+launch finds a heartbeat that was never closed, the renderer was killed without unloading — and that
+record is reported to **Error Center** as `browser_terminated_session` with the last measured numbers.
+Two pressure signals are reported the same way while the app is still alive:
+
+- `memory_pressure` — heap crossed 70 % of the renderer limit (the response cache is dropped at once);
+- `long_task_pressure` — 50+ main-thread blocks over 50 ms in one session.
+
+So the next report is not "it crashed again" but, for example, "died on `/console` after 11 minutes with
+a 412 MB heap and 63 long tasks". The sentinel never blocks rendering, never runs while hidden, and
+swallows its own failures.
+
+**Not verified here:** a physical Android device, an installed PWA on Android, and Android WebView. The
+changes above are reasoned from the code and measured on the server side (payload sizes, row counts,
+bundle sizes); the device-side claims rest on the diagnostics the sentinel now records in Error Center.
+
+---
+
 ## Architecture
 
 ```

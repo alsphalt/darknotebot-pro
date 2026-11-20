@@ -23,6 +23,8 @@ const read = (relative: string) => readFileSync(path.join(root, relative), 'utf8
 
 const provider = read('src/components/christmas/provider.tsx');
 const css = read('src/app/globals.css');
+const settingsPage = read('src/app/(app)/settings/page.tsx');
+const platformPanels = read('src/components/settings/platform-panels.tsx');
 
 /** Minimal window stand-in: only the members the helper touches. */
 function withWindow(
@@ -63,21 +65,26 @@ test('the device mode wins over the server default, and defaults when absent', (
   assert.equal(storedMode({ mode: 'garbage' }, DEFAULT_APPEARANCE), 'on');
 });
 
-test('the launch intro is not gated by introSeen', () => {
-  // introSeen may only appear in the browser first-run branch, never in the
-  // standalone branch that runs on mount.
-  const launchBranch = provider.slice(
-    provider.indexOf('Installed-app launch'),
-    provider.indexOf('First-run introduction'),
-  );
-  assert.ok(launchBranch.length > 0, 'the installed-app launch branch is missing');
-  // Drop the prose: the doc comment explains introSeen, the code must not read it.
-  const code = launchBranch
-    .slice(launchBranch.indexOf('*/') + 2)
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/.*$/gm, '');
-  assert.ok(!code.includes('introSeen'), 'a launch must not be suppressed by introSeen');
-  assert.match(code, /setIntroOpen\(true\)/);
+test('the introduction is unconditional: no introSeen, mode or device check can suppress it', () => {
+  // The product requirement is that the intro is permanent. The provider must
+  // therefore show it from a mount effect with an empty dependency list, and
+  // must not consult any stored preference to decide otherwise.
+  // Comments may explain the removed options; only executable code is checked.
+  const code = provider.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.match(code, /useEffect\(\(\) => \{\s*setIntroOpen\(true\);\s*\}, \[\]\)/);
+  assert.ok(!code.includes('introSeen'), 'the provider must not read introSeen any more');
+  assert.ok(!/prefs\.intro\b/.test(code), 'the provider must not gate the intro on a boolean preference');
+  assert.ok(!code.includes('storedMode('), 'the provider must not consult the stored device mode');
+  assert.ok(!code.includes('isStandaloneLaunch('), 'the intro must not depend on how the app was launched');
+});
+
+test('the intro keeps its branding, its motion preference and the snow layer', () => {
+  assert.match(provider, /DARKNOTE/);
+  assert.match(provider, /POWERED BY JIMMY M, TECH/);
+  // Reduced motion neutralises the animation instead of removing the intro.
+  assert.match(provider, /prefersReducedMotion\(\)/);
+  assert.match(provider, /data-motion/);
+  assert.match(provider, /<SnowLayer \/>/);
 });
 
 test('the boot shield exists in SSR markup and is scoped to installed apps', () => {
@@ -85,4 +92,14 @@ test('the boot shield exists in SSR markup and is scoped to installed apps', () 
   assert.match(css, /\.xmas-boot\s*\{[^}]*display:\s*none/);
   assert.match(css, /@media[^{]*display-mode:\s*standalone[^{]*\{[\s\S]*?\.xmas-boot/);
   assert.match(css, /html\[data-xmas-boot="done"\]\s+\.xmas-boot\s*\{[^}]*display:\s*none/);
+});
+
+test('the appearance settings section is gone, and no switch can disable the intro', () => {
+  assert.ok(!settingsPage.includes('AppearanceSettingsPanel'), 'Admin Settings must not render the appearance panel');
+  assert.ok(!settingsPage.includes('"appearance"'), 'Admin Settings must not offer an appearance tab');
+  assert.ok(!platformPanels.includes('AppearanceSettingsPanel'), 'the appearance panel component must be removed');
+  assert.ok(!platformPanels.includes('replayIntro'), 'no replay/disable control may remain');
+  // The branding and the animation are still part of the product.
+  assert.match(css, /\.xmas-intro\b/);
+  assert.match(css, /\.xmas-brand\b/);
 });

@@ -8,7 +8,6 @@ import { useServers, useToast } from "@/components/providers";
 import { InstallAppCard } from "@/components/pwa";
 import { GitHubSettings } from "@/components/projects/github-settings";
 import {
-  AppearanceSettingsPanel,
   BiometricSettingsPanel,
   GitHubBindingsPanel,
   RegistrationSettingsPanel,
@@ -47,7 +46,7 @@ export default function SettingsPage() {
   const { push } = useToast();
   const settings = useApi<Settings>("/api/settings");
   const detail = useApi<ServerDetail>(activeId ? `/api/servers/${activeId}` : null);
-  const [tab, setTab] = useState<"servers" | "github" | "accounts" | "security" | "appearance">("servers");
+  const [tab, setTab] = useState<"servers" | "github" | "accounts" | "security">("servers");
 
   // `?tab=github` is used by the OAuth callback and by the "open GitHub
   // configuration" button in the import dialog.
@@ -57,7 +56,6 @@ export default function SettingsPage() {
       requested === "github" ||
       requested === "accounts" ||
       requested === "security" ||
-      requested === "appearance" ||
       requested === "servers"
     ) {
       setTab(requested);
@@ -167,7 +165,7 @@ export default function SettingsPage() {
         description="Connections, permissions, deployment policy and platform configuration."
         actions={
           <div className="flex gap-1 rounded-lg border border-ink-700/70 bg-ink-900/60 p-1">
-            {(["servers", "github", "accounts", "security", "appearance"] as const).map((key) => (
+            {(["servers", "github", "accounts", "security"] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => setTab(key)}
@@ -472,7 +470,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {tab === "appearance" && <AppearanceSettingsPanel />}
 
       <ConfirmDialog
         open={removeTarget !== null}

@@ -62,7 +62,10 @@ export function PwaProvider({ children }: { children: React.ReactNode }) {
     let visibilityListener: (() => void) | null = null;
 
     navigator.serviceWorker
-      .register("/sw.js", { scope: "/" })
+      // `updateViaCache: "none"` keeps the HTTP cache from pinning an old worker
+      // after a redeploy — the failure mode where a phone runs last week's bundle
+      // for days and every fix appears not to have shipped.
+      .register("/sw.js", { scope: "/", updateViaCache: "none" })
       .then((registration) => {
         if (cancelled) return;
         registrationRef.current = registration;

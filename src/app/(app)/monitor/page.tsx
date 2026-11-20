@@ -160,7 +160,7 @@ export default function MonitorPage() {
           {data?.console.lines.length ? (
             <div className="code-scroll max-h-[340px] overflow-auto rounded-lg border border-ink-700/70 bg-ink-950/80 px-3 py-2">
               {data.console.lines.slice(-80).map((line, index) => (
-                <div key={`${line.ts}-${index}`} className={line.level === "error" ? "text-rose-300" : line.level === "warn" ? "text-amber-300" : line.level === "system" ? "text-cyber/80" : "text-slate-300"}>
+                <div key={`${line.ts}-${index}`} className={`cv-auto ${line.level === "error" ? "text-rose-300" : line.level === "warn" ? "text-amber-300" : line.level === "system" ? "text-cyber/80" : "text-slate-300"}`}>
                   {line.text}
                 </div>
               ))}

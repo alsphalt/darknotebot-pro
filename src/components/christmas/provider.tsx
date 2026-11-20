@@ -2,154 +2,77 @@
 
 import dynamic from "next/dynamic";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { apiGet } from "@/lib/client";
-import {
-  CHRISTMAS_STORAGE_KEY,
-  DEFAULT_APPEARANCE,
-  isStandaloneLaunch,
-  mergePrefs,
-  parseStored,
-  prefersReducedMotion,
-  serializePrefs,
-  storedMode,
-  type ChristmasMode,
-  type ChristmasPrefs,
-  type ServerAppearance,
-} from "./prefs";
+import { prefersReducedMotion, type ChristmasMode } from "./prefs";
 
 /**
- * Christmas edition controller.
+ * The DARKNOTE introduction.
  *
- * - Applies the appearance defaults from the server, then the device choice.
- * - Sets `data-christmas` / `data-motion` on <html>, which is all the CSS needs.
- * - Shows the introduction once per device (never again unless replayed) and only
- *   when the user has not asked for reduced motion.
+ * This is part of the product, not a preference. It plays on every launch — a
+ * browser tab, the installed PWA and the future APK alike — and there is no
+ * switch, query parameter or stored value that suppresses it. The old
+ * device-local `intro`/`introSeen`/`mode` options are ignored rather than
+ * honoured, so a device that had turned the intro off will show it again after
+ * this build.
  *
- * The snow canvas is loaded lazily: it is decorative, so it must never delay the
+ * Accessibility is still respected: when the operating system asks for reduced
+ * motion the same introduction renders with its animation neutralised
+ * (`data-motion="reduced"`), instead of being skipped entirely.
+ *
+ * The snow canvas is loaded lazily; it is decorative and must never delay the
  * first paint or the hydration of the console.
  */
 const SnowLayer = dynamic(() => import("./snow").then((module) => module.SnowLayer), { ssr: false });
 
 interface ChristmasContextValue {
-  prefs: ChristmasPrefs;
-  ready: boolean;
-  setMode: (mode: ChristmasMode) => void;
-  setIntro: (enabled: boolean) => void;
-  setSnow: (enabled: boolean) => void;
-  replayIntro: () => void;
+  /** Only the festive styling switch the shell needs; the intro is not optional. */
+  mode: ChristmasMode;
   dismissIntro: () => void;
 }
 
 const ChristmasContext = createContext<ChristmasContextValue | null>(null);
 
-function readLocal(): Record<string, unknown> {
-  if (typeof window === "undefined") return {};
-  try {
-    return parseStored(window.localStorage.getItem(CHRISTMAS_STORAGE_KEY));
-  } catch {
-    return {};
-  }
-}
-
 /**
  * Lifts the pre-hydration boot shield (see `.xmas-boot` in globals.css). The
- * shield only renders for installed apps: it covers the console until the
- * introduction has taken over, so the dashboard never paints ahead of it.
+ * shield covers the console until the introduction has taken over, so the
+ * dashboard never paints ahead of it.
  */
 function releaseBootShield(): void {
   if (typeof document === "undefined") return;
   document.documentElement.dataset.xmasBoot = "done";
 }
 
-function persist(prefs: ChristmasPrefs): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(CHRISTMAS_STORAGE_KEY, serializePrefs(prefs));
-  } catch {
-    /* storage can be full or blocked; the session still behaves */
-  }
-}
-
 export function ChristmasProvider({ children }: { children: React.ReactNode }) {
-  const [prefs, setPrefs] = useState<ChristmasPrefs>(() => mergePrefs(DEFAULT_APPEARANCE, null));
-  const [ready, setReady] = useState(false);
+  // Branding only: stored intro/snow/introSeen values are deliberately ignored.
+  const mode: ChristmasMode = "on";
   const [introOpen, setIntroOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [reduced, setReduced] = useState(false);
   const timer = useRef<number | null>(null);
 
-  // Defaults from the server, overridden by this device's choice.
+  // Motion preference drives the presentation, never whether the intro exists.
   useEffect(() => {
-    let cancelled = false;
-    const local = readLocal();
-    setPrefs(mergePrefs(DEFAULT_APPEARANCE, local));
-
-    apiGet<{ appearance: ServerAppearance }>("/api/auth/policy")
-      .then((policy) => {
-        if (cancelled) return;
-        setPrefs(mergePrefs(policy.appearance ?? DEFAULT_APPEARANCE, local));
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setReady(true);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    setReduced(prefersReducedMotion());
   }, []);
 
   // One attribute pair drives every festive style.
   useEffect(() => {
     if (typeof document === "undefined") return;
     const root = document.documentElement;
-    root.dataset.christmas = prefs.mode;
-    root.dataset.motion = prefs.mode === "reduced" ? "reduced" : "full";
-  }, [prefs.mode]);
+    root.dataset.christmas = mode;
+    root.dataset.motion = reduced ? "reduced" : "full";
+  }, [mode, reduced]);
 
-  /**
-   * Installed-app launch: the introduction plays every time the app is opened,
-   * and it starts before the console is reachable. This runs on mount — not
-   * after the policy request — so nothing is gated behind a network round trip.
-   *
-   * `introSeen` is deliberately ignored here: it only marks the browser's
-   * first-run moment. Turning Christmas effects off, or asking for reduced
-   * motion, still wins.
-   */
+  // Always. Tab, installed app, WebView and the future APK all take this path.
   useEffect(() => {
-    if (!isStandaloneLaunch()) {
-      releaseBootShield();
-      return;
-    }
-    if (prefersReducedMotion() || storedMode(readLocal(), DEFAULT_APPEARANCE) === "off") {
-      releaseBootShield();
-      return;
-    }
     setIntroOpen(true);
   }, []);
 
-  // The policy can still say the effects are off. The launch intro is decided
-  // before that response arrives, so honour it here instead of showing a
-  // festive intro on an app that has Christmas turned off.
-  useEffect(() => {
-    if (!introOpen || prefs.mode !== "off") return;
-    setIntroOpen(false);
-    setLeaving(false);
-    releaseBootShield();
-  }, [introOpen, prefs.mode]);
-
-  // First-run introduction (browser tabs; installed launches are handled above).
-  useEffect(() => {
-    if (!ready) return;
-    if (isStandaloneLaunch()) return;
-    if (!prefs.intro || prefs.introSeen || prefs.mode === "off" || prefersReducedMotion()) {
-      releaseBootShield();
-      return;
-    }
-    setIntroOpen(true);
-  }, [prefs.intro, prefs.introSeen, prefs.mode, ready]);
-
+  // Auto-dismiss. Reduced motion keeps the same beat but without the long
+  // animation, so a user who asked for less motion is not held on a title card.
   useEffect(() => {
     if (!introOpen) return;
+    const holdMs = reduced ? 2_600 : 4_200;
+    const fadeMs = reduced ? 200 : 620;
     timer.current = window.setTimeout(() => {
       setLeaving(true);
       // Reveal the console underneath while the intro fades out, not after it.
@@ -157,17 +80,12 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
       timer.current = window.setTimeout(() => {
         setIntroOpen(false);
         setLeaving(false);
-        setPrefs((current) => {
-          const next = { ...current, introSeen: true };
-          persist(next);
-          return next;
-        });
-      }, 620);
-    }, 4200);
+      }, fadeMs);
+    }, holdMs);
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
-  }, [introOpen]);
+  }, [introOpen, reduced]);
 
   const dismissIntro = useCallback(() => {
     if (timer.current) window.clearTimeout(timer.current);
@@ -176,45 +94,17 @@ export function ChristmasProvider({ children }: { children: React.ReactNode }) {
     window.setTimeout(() => {
       setIntroOpen(false);
       setLeaving(false);
-      setPrefs((current) => {
-        const next = { ...current, introSeen: true };
-        persist(next);
-        return next;
-      });
-    }, 420);
-  }, []);
+    }, reduced ? 180 : 420);
+  }, [reduced]);
 
-  const update = useCallback((patch: Partial<ChristmasPrefs>) => {
-    setPrefs((current) => {
-      const next = { ...current, ...patch };
-      if (next.mode === "reduced") next.snow = false;
-      persist(next);
-      return next;
-    });
-  }, []);
-
-  const value = useMemo<ChristmasContextValue>(
-    () => ({
-      prefs,
-      ready,
-      setMode: (mode) => update({ mode }),
-      setIntro: (intro) => update({ intro }),
-      setSnow: (snow) => update({ snow }),
-      replayIntro: () => {
-        update({ intro: true, introSeen: false });
-        setIntroOpen(true);
-      },
-      dismissIntro,
-    }),
-    [dismissIntro, prefs, ready, update],
-  );
+  const value = useMemo<ChristmasContextValue>(() => ({ mode, dismissIntro }), [dismissIntro, mode]);
 
   return (
     <ChristmasContext.Provider value={value}>
       {/* Installed apps paint this before hydration; it is display:none in a tab. */}
       <div className="xmas-boot" aria-hidden="true" />
       {children}
-      {prefs.mode !== "off" && prefs.snow && prefs.mode !== "reduced" ? <SnowLayer /> : null}
+      <SnowLayer />
       {introOpen ? <ChristmasIntro leaving={leaving} onSkip={dismissIntro} /> : null}
     </ChristmasContext.Provider>
   );

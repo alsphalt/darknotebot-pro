@@ -83,7 +83,7 @@ export function AppShell({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [openProblems, setOpenProblems] = useState(0);
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const { prefs } = useChristmas();
+  const { mode } = useChristmas();
 
   // One cheap read per session so the floating orb can show a real problem dot.
   useEffect(() => {
@@ -136,7 +136,7 @@ export function AppShell({
       <div className="min-w-0">
         <p className="truncate text-[13px] font-semibold tracking-[0.16em] text-slate-100">DARKNOTE</p>
         <p className="truncate text-[10px] uppercase tracking-[0.24em] text-slate-500">
-          {prefs.mode === "off" ? "Control Center" : "Jimmy M, Tech"}
+          {mode === "off" ? "Control Center" : "Jimmy M, Tech"}
         </p>
       </div>
     </div>
@@ -206,7 +206,7 @@ export function AppShell({
       )}
 
       <div className="lg:pl-[248px]">
-        {prefs.mode !== "off" && <div className="xmas-ribbon h-[2px] w-full opacity-80" aria-hidden="true" />}
+        <div className="xmas-ribbon h-[2px] w-full opacity-80" aria-hidden="true" />
         <header className="sticky top-0 z-30 border-b border-ink-750/70 bg-ink-950/80 backdrop-blur-xl">
           <div className="flex items-center gap-2 px-3 py-2.5 sm:px-6">
             <button

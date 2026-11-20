@@ -1,55 +1,154 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { env, ensureDataDirs } from './env';
+import { migrate, migrationStatus, type MigrateResult } from './db/migrate';
+import type { DbClient, DbConnection, DbKind, DbPoolStats, MigrationStatus, SqlParam } from './db/types';
 
-export type SqlParam = string | number | boolean | null | string[] | number[];
-export interface DbConnection {
-  query<T = Record<string, unknown>>(sql: string, params?: SqlParam[]): Promise<{ rows: T[] }>;
-  /** Run a multi-statement script. Used only for schema application. */
-  exec(sql: string): Promise<void>;
-}
+export type { DbClient, DbConnection, DbKind, DbPoolStats, SqlParam } from './db/types';
 
-export interface DbClient extends DbConnection {
-  readonly kind: 'neon' | 'pglite';
-  transaction<T>(fn: (connection: DbConnection) => Promise<T>): Promise<T>;
-}
-
-const SCHEMA_VERSION = 5;
+/**
+ * Database access.
+ *
+ * One interface (`DbClient`) over three drivers:
+ *
+ *   - `postgres` — node-postgres over TCP/TLS. Works with a Neon pooled
+ *     connection string (`…-pooler.…neon.tech`), with a self-hosted PostgreSQL
+ *     and with CI. This is the default whenever `DATABASE_URL` is set.
+ *   - `neon` — `@neondatabase/serverless` (WebSocket) for environments where a
+ *     long-lived TCP socket is unavailable or wasteful. Opt in with
+ *     `DARKNOTE_DB_DRIVER=neon`.
+ *   - `pglite` — the embedded PostgreSQL build used for local evaluation and by
+ *     the test suite. Never the production store.
+ *
+ * Two rules keep connections from leaking:
+ *
+ *   1. The pool is created once per process (cached promise, also across HMR
+ *      reloads through `globalThis`), so a request never opens a connection.
+ *   2. On a serverless platform the pool is capped at one connection and
+ *      `allowExitOnIdle` is set, so an idle function instance returns its
+ *      connection to the pooler instead of holding a Neon slot.
+ */
 
 interface Cache {
   client?: Promise<DbClient>;
+  migrations?: MigrateResult | null;
 }
+
 const globalCache = globalThis as unknown as { __darknoteDb?: Cache };
 const cache: Cache = (globalCache.__darknoteDb ??= {});
 
-function schemaSql(): string {
-  const candidates = [
-    path.join(process.cwd(), 'db', 'schema.sql'),
-    path.join(process.cwd(), '..', 'db', 'schema.sql'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8');
+/** Human-readable description of the configured target, never the password. */
+function describeTarget(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}${parsed.pathname}`;
+  } catch {
+    return 'configured database';
   }
-  throw new Error('db/schema.sql not found — cannot initialise the database');
 }
 
-async function createNeon(): Promise<DbClient> {
+function isNeonHost(url: string): boolean {
+  try {
+    return /\.neon\.tech$/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sslConfig(): false | { rejectUnauthorized: boolean } {
+  if (env.databaseSsl === 'disable') return false;
+  return { rejectUnauthorized: env.databaseSsl !== 'no-verify' };
+}
+
+/**
+ * Pool size.
+ *
+ * Neon's pooled endpoint (PgBouncer in transaction mode) multiplexes many
+ * clients onto few server connections, so the only thing a large local pool
+ * achieves on Vercel is exhausting the project's connection limit. One
+ * connection per instance is the documented serverless default; a long-running
+ * `next start` deployment can use more.
+ */
+export function poolSize(): number {
+  const explicit = Number(process.env.DARKNOTE_DB_POOL ?? '');
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(20, Math.floor(explicit));
+  const serverless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+  return serverless ? 1 : 8;
+}
+
+const TRANSIENT = [
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'CONNECTION_ENDED',
+  'CONNECTION_DESTROYED',
+  'CONNECTION_CLOSED',
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now
+  '53300', // too_many_connections
+  '08000',
+  '08003',
+  '08006',
+  '08001',
+];
+
+export function isTransientDbError(error: unknown): boolean {
+  const err = error as { code?: string; message?: string } | undefined;
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  if (TRANSIENT.includes(code)) return true;
+  const message = String(err.message ?? '').toLowerCase();
+  return (
+    message.includes('connection terminated') ||
+    message.includes('connection closed') ||
+    message.includes('server closed the connection') ||
+    message.includes('timeout exceeded when trying to connect')
+  );
+}
+
+/** One retry, short backoff — enough for a pooled connection recycled by Neon. */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts || !isTransientDbError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 120 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+function nullStats(): DbPoolStats {
+  return { total: null, idle: null, waiting: null };
+}
+
+async function createPostgres(): Promise<DbClient> {
   const { Pool } = await import('pg');
-  const sslSetting = env.databaseSsl;
   const pool = new Pool({
     connectionString: env.databaseUrl,
-    max: Number(process.env.DARKNOTE_DB_POOL ?? 8),
-    idleTimeoutMillis: 30_000,
+    max: poolSize(),
+    idleTimeoutMillis: 20_000,
     connectionTimeoutMillis: 15_000,
-    ssl:
-      sslSetting === 'disable'
-        ? false
-        : { rejectUnauthorized: sslSetting !== 'no-verify' },
+    allowExitOnIdle: true,
+    application_name: 'darknote-control-center',
+    ssl: sslConfig(),
   });
+  // A pool error (server restart, network reset) must not take the process down:
+  // node-postgres emits it on the pool, and an unhandled 'error' event is fatal.
+  pool.on('error', (error) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[darknote] idle database connection dropped: ${error.message}`);
+  });
+
   const client: DbClient = {
-    kind: 'neon',
+    kind: 'postgres',
+    target: describeTarget(env.databaseUrl),
     async query<T>(sql: string, params?: SqlParam[]) {
-      const res = await pool.query(sql, params as unknown[]);
+      const res = await withRetry(() => pool.query(sql, params as unknown[]));
       return { rows: res.rows as T[] };
     },
     async exec(sql: string) {
@@ -75,12 +174,96 @@ async function createNeon(): Promise<DbClient> {
         try {
           await connection.query('rollback');
         } catch {
-          /* ignore rollback failure */
+          /* the connection is already gone; rollback is implicit */
         }
         throw error;
       } finally {
         connection.release();
       }
+    },
+    stats() {
+      return {
+        total: pool.totalCount ?? null,
+        idle: pool.idleCount ?? null,
+        waiting: pool.waitingCount ?? null,
+      };
+    },
+    async close() {
+      await pool.end().catch(() => undefined);
+    },
+  };
+  return client;
+}
+
+/**
+ * Neon's serverless driver. Same SQL, no TCP socket: queries travel over a
+ * WebSocket to the same PostgreSQL endpoint, which is what survives a
+ * serverless platform that freezes or recycles a function between requests.
+ */
+async function createNeonServerless(): Promise<DbClient> {
+  const neonModule = await import('@neondatabase/serverless');
+  const { Pool, neonConfig } = neonModule;
+
+  // Node needs an explicit WebSocket implementation; browsers have a global.
+  if (!neonConfig.webSocketConstructor) {
+    const { default: WebSocket } = await import('ws');
+    neonConfig.webSocketConstructor = WebSocket as unknown as typeof globalThis.WebSocket;
+  }
+
+  const pool = new Pool({
+    connectionString: env.databaseUrl,
+    max: poolSize(),
+    idleTimeoutMillis: 20_000,
+    connectionTimeoutMillis: 15_000,
+    allowExitOnIdle: true,
+  });
+
+  const client: DbClient = {
+    kind: 'neon',
+    target: describeTarget(env.databaseUrl),
+    async query<T>(sql: string, params?: SqlParam[]) {
+      const res = await withRetry(() => pool.query(sql, params as unknown[]));
+      return { rows: res.rows as T[] };
+    },
+    async exec(sql: string) {
+      await pool.query(sql);
+    },
+    async transaction<T>(fn: (connection: DbConnection) => Promise<T>) {
+      const connection = await pool.connect();
+      const transactionClient: DbConnection = {
+        async query<T>(sql: string, params?: SqlParam[]) {
+          const result = await connection.query(sql, params as unknown[]);
+          return { rows: result.rows as T[] };
+        },
+        async exec(sql: string) {
+          await connection.query(sql);
+        },
+      };
+      try {
+        await connection.query('begin');
+        const result = await fn(transactionClient);
+        await connection.query('commit');
+        return result;
+      } catch (error) {
+        try {
+          await connection.query('rollback');
+        } catch {
+          /* ignore */
+        }
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
+    stats() {
+      return {
+        total: (pool as unknown as { totalCount?: number }).totalCount ?? null,
+        idle: (pool as unknown as { idleCount?: number }).idleCount ?? null,
+        waiting: (pool as unknown as { waitingCount?: number }).waitingCount ?? null,
+      };
+    },
+    async close() {
+      await pool.end().catch(() => undefined);
     },
   };
   return client;
@@ -92,6 +275,7 @@ async function createPglite(): Promise<DbClient> {
   const pg = await PGlite.create({ dataDir: env.pgliteDir });
   const client: DbClient = {
     kind: 'pglite',
+    target: env.pgliteDir,
     async query<T>(sql: string, params?: SqlParam[]) {
       const res = await pg.query(sql, params as unknown[]);
       return { rows: res.rows as T[] };
@@ -118,120 +302,80 @@ async function createPglite(): Promise<DbClient> {
         try {
           await pg.query('rollback');
         } catch {
-          /* ignore rollback failure */
+          /* ignore */
         }
         throw error;
       }
+    },
+    stats() {
+      return nullStats();
+    },
+    async close() {
+      await pg.close().catch(() => undefined);
     },
   };
   return client;
 }
 
+function resolveKind(): DbKind {
+  if (env.dbDriver === 'pglite') return 'pglite';
+  if (!env.databaseUrl) return 'pglite';
+  if (env.dbDriver === 'neon') return 'neon';
+  if (env.dbDriver === 'postgres' || env.dbDriver === 'pg') return 'postgres';
+  // auto
+  return isNeonHost(env.databaseUrl) && (process.env.VERCEL === '1' || process.env.DARKNOTE_NEON_SERVERLESS === '1')
+    ? 'neon'
+    : 'postgres';
+}
+
+async function connect(): Promise<DbClient> {
+  const kind = resolveKind();
+  if (kind === 'pglite') return createPglite();
+  return kind === 'neon' ? createNeonServerless() : createPostgres();
+}
+
 /**
- * Columns added to tables that a previous build already created.
+ * Migrations on boot.
  *
- * `create table if not exists` never alters a table that already exists, so an
- * older database keeps its old column set. schema.sql is then executed against
- * it and fails halfway — `imported_project_files_pending_delete_idx` references
- * `pending_delete`, which the old table does not have:
- *
- *   column "pending_delete" does not exist   (db/schema.sql:854)
- *
- * Because that failure happens before the version marker is written, every
- * later boot repeats it and every query fails. The repair therefore runs BEFORE
- * schema.sql and independently of the version marker, so a database that is
- * already marked current but drifted still heals itself.
+ * A controlled deployment (Vercel build step, `npm run db:migrate`) should own
+ * schema changes. Booting the app therefore *verifies* the registry by default
+ * and only applies pending files when there is no deployment step — which is the
+ * case for local runs and for a first install. `DARKNOTE_DB_MIGRATE=always`
+ * forces the old behaviour, `never` makes a pending migration a startup error
+ * instead of a silent half-schema.
  */
-const LEGACY_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
-  ['imported_project_files', 'pending_delete', 'boolean not null default false'],
-  ['github_sync_jobs', 'message', 'text'],
-  ['editor_drafts', 'expected_bytes', 'bigint'],
-  ['editor_drafts', 'expected_sha256', 'text'],
-  ['editor_drafts', 'chunk_count', 'integer'],
-];
-
-async function tableExists(client: DbClient, table: string): Promise<boolean> {
-  const result = await client.query<{ present: boolean }>(
-    `select exists (
-       select 1 from information_schema.tables
-        where table_schema = current_schema() and table_name = $1
-     ) as present`,
-    [table],
-  );
-  return Boolean(result.rows[0]?.present);
-}
-
-/** Idempotent: adds the column only when the table exists without it. */
-async function addColumnIfMissing(
-  client: DbClient,
-  table: string,
-  column: string,
-  definition: string,
-): Promise<void> {
-  const result = await client.query<{ present: boolean }>(
-    `select exists (
-       select 1 from information_schema.columns
-        where table_schema = current_schema() and table_name = $1 and column_name = $2
-     ) as present`,
-    [table, column],
-  );
-  if (result.rows[0]?.present) return;
-  if (!(await tableExists(client, table))) return;
-  await client.query(`alter table ${table} add column if not exists ${column} ${definition}`);
-}
-
-async function repairLegacyColumns(client: DbClient): Promise<void> {
-  for (const [table, column, definition] of LEGACY_COLUMNS) {
-    await addColumnIfMissing(client, table, column, definition);
+async function bootMigrations(client: DbClient): Promise<MigrateResult | null> {
+  // CLI paths (db:migrate, db:backup, db:restore) own the schema themselves and
+  // must be able to take a backup *before* anything is applied.
+  if (process.env.DARKNOTE_NO_AUTO_MIGRATE === '1') return null;
+  const mode = (process.env.DARKNOTE_DB_MIGRATE ?? 'auto').toLowerCase();
+  if (mode === 'never') {
+    const status = await migrationStatus(client).catch(() => null);
+    if (status && status.pending.length > 0) {
+      throw new Error(
+        `The database has ${status.pending.length} pending migration(s) (${status.pending.join(', ')}). Run \`npm run db:migrate\` before starting the app (DARKNOTE_DB_MIGRATE=never).`,
+      );
+    }
+    return null;
   }
-}
-
-async function migrate(client: DbClient): Promise<void> {
-  await client.query(
-    `create table if not exists schema_migrations (version integer primary key, applied_at timestamptz not null default now())`,
-  );
-  const applied = await client.query<{ version: number }>(`select version from schema_migrations`);
-  const versions = new Set(applied.rows.map((r) => Number(r.version)));
-  // Pre-flight repair: schema.sql creates indexes and constraints that reference
-  // columns only this file adds later, so an older table must be completed first.
-  await repairLegacyColumns(client);
-  if (versions.has(SCHEMA_VERSION)) return;
-  // schema.sql is idempotent (create ... if not exists). It must run on the same
-  // connection/instance the application will query, otherwise the tables land in
-  // a different database.
-  await client.exec(schemaSql());
-
-  // v2: the old schema defaulted every server to a 512 KB file limit, which the
-  // read layer doubled into the "2048 KB editor/backup limit" error. Raise that
-  // old default once; values an operator deliberately set are left alone.
-  if (!versions.has(2)) {
-    await client.query(
-      `alter table connected_servers alter column max_file_bytes set default 16777216`,
-    );
-    await client.query(`update connected_servers set max_file_bytes = 16777216 where max_file_bytes = 524288`);
-  }
-  await repairLegacyColumns(client);
-
-  // v3: Error Intelligence (error_intel_events) and BIGBROTHER (conversations,
-  // messages, memory, assets, tutorials, usage). schema.sql is idempotent, so
-  // the table block above already creates them; this block only records the
-  // migration marker and keeps the version list consistent.
-  await client.query(`insert into schema_migrations (version) values ($1) on conflict do nothing`, [
-    SCHEMA_VERSION,
-  ]);
+  return migrate(client, { allowDrift: mode !== 'strict' });
 }
 
 export function db(): Promise<DbClient> {
   if (!cache.client) {
     cache.client = (async () => {
-      const useNeon = env.databaseUrl.length > 0 && env.dbDriver !== 'pglite';
-      const client = useNeon ? await createNeon() : await createPglite();
-      await migrate(client);
-      return client;
-    })().catch((error) => {
-      cache.client = undefined;
-      throw error;
-    });
+      const client = await connect();
+      try {
+        cache.migrations = await bootMigrations(client);
+        return client;
+      } catch (error) {
+        // Do not cache a failed initialisation: the next request retries, and a
+        // database that comes back after an outage heals without a redeploy.
+        await client.close().catch(() => undefined);
+        cache.client = undefined;
+        throw error;
+      }
+    })();
   }
   return cache.client;
 }
@@ -275,6 +419,97 @@ export async function withTransaction<T>(fn: (connection: DbConnection) => Promi
   return client.transaction(fn);
 }
 
-export function dbKind(): 'neon' | 'pglite' | 'unknown' {
-  return env.databaseUrl && env.dbDriver !== 'pglite' ? 'neon' : 'pglite';
+export function dbKind(): DbKind {
+  return resolveKind();
+}
+
+/** Release the pool. Scripts and tests only — the app keeps one pool for its life. */
+export async function closeDatabase(): Promise<void> {
+  const pending = cache.client;
+  cache.client = undefined;
+  cache.migrations = undefined;
+  if (!pending) return;
+  const client = await pending.catch(() => null);
+  await client?.close();
+}
+
+export interface DbHealth {
+  ok: boolean;
+  kind: DbKind;
+  target: string;
+  latencyMs: number | null;
+  serverVersion: string | null;
+  tables: number | null;
+  administrators: number | null;
+  pool: DbPoolStats;
+  migrations: { applied: number; pending: string[]; drifted: string[]; latest: string | null };
+  error: string | null;
+}
+
+/**
+ * Real connection test: asks PostgreSQL for its version, counts the schema and
+ * reports what the migration registry holds. Used by `/api/health` and by
+ * `npm run db:check`, so a deployment never claims to be healthy on a cached
+ * answer.
+ */
+export async function dbHealth(): Promise<DbHealth> {
+  const kind = resolveKind();
+  const base: DbHealth = {
+    ok: false,
+    kind,
+    target: kind === 'pglite' ? env.pgliteDir : describeTarget(env.databaseUrl),
+    latencyMs: null,
+    serverVersion: null,
+    tables: null,
+    administrators: null,
+    pool: nullStats(),
+    migrations: { applied: 0, pending: [], drifted: [], latest: null },
+    error: null,
+  };
+
+  try {
+    const client = await db();
+    const started = Date.now();
+    const version = await client.query<{ version: string }>('select version() as version');
+    const tables = await client.query<{ count: string | number }>(
+      `select count(*)::int as count from information_schema.tables where table_schema = current_schema()`,
+    );
+    let administrators: number | null = null;
+    try {
+      const admins = await client.query<{ count: string | number }>(
+        'select count(*)::int as count from admin_users',
+      );
+      administrators = Number(admins.rows[0]?.count ?? 0);
+    } catch {
+      administrators = null;
+    }
+    const status: MigrationStatus = await migrationStatus(client).catch(() => ({
+      available: [],
+      applied: [],
+      pending: [],
+      drifted: [],
+    }));
+
+    return {
+      ...base,
+      ok: true,
+      latencyMs: Date.now() - started,
+      serverVersion: String(version.rows[0]?.version ?? '').split(' ').slice(0, 2).join(' ') || null,
+      tables: Number(tables.rows[0]?.count ?? 0),
+      administrators,
+      pool: client.stats(),
+      migrations: {
+        applied: status.applied.length,
+        pending: status.pending,
+        drifted: status.drifted,
+        latest: status.applied.at(-1)?.name ?? null,
+      },
+    };
+  } catch (error) {
+    return {
+      ...base,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

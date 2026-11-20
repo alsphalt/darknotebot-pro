@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { AlertTriangle, ArrowLeftRight, FileDiff, RefreshCw, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
+import { GitHubSyncStatus } from "@/components/github/sync-status";
 import { useServers, useToast } from "@/components/providers";
 import { Badge, ConfirmDialog, Empty, Modal, Panel, Spinner, Stat, Status } from "@/components/ui";
 import { apiDelete, apiGet, apiPost, errorMessage } from "@/lib/client";
@@ -132,6 +133,11 @@ export default function SyncPage() {
           </button>
         }
       />
+
+      {/* GitHub ↔ DARKNOTE. Reads persisted state from the sync engine only. */}
+      <div className="mb-4">
+        <GitHubSyncStatus />
+      </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-ink-700/60 bg-ink-900/50 px-3 py-2 text-[11px]">
         <Status status={data.data?.state ?? "UNKNOWN"} />

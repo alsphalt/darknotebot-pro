@@ -8,17 +8,13 @@ import {
   Github,
   Loader2,
   Lock,
-  Palette,
   Smartphone,
-  Snowflake,
-  Sparkles,
   Trash2,
   UserPlus,
 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPut, errorMessage } from "@/lib/client";
 import { useServers, useToast } from "@/components/providers";
 import { Badge, Empty, Panel, Spinner } from "@/components/ui";
-import { useChristmas } from "@/components/christmas/provider";
 import { relative } from "@/lib/format";
 import {
   hasPlatformAuthenticator,
@@ -57,135 +53,6 @@ function usePlatformSettings() {
   }, [reload]);
 
   return { settings, error, reload, setSettings };
-}
-
-// ------------------------------------------------------------- appearance
-
-export function AppearanceSettingsPanel() {
-  const { push } = useToast();
-  const { prefs, setMode, setIntro, setSnow, replayIntro } = useChristmas();
-  const platform = usePlatformSettings();
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const saveDefault = async (patch: Record<string, unknown>, key: string) => {
-    setBusy(key);
-    try {
-      const data = await apiPut<{ settings: PlatformSettings }>("/api/settings/platform", { appearance: patch });
-      platform.setSettings(data.settings);
-      push("Platform appearance saved", "ok");
-    } catch (err) {
-      push(errorMessage(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const mode = prefs.mode;
-
-  return (
-    <div className="space-y-4">
-      <Panel
-        title="Christmas effects"
-        subtitle="Seasonal visuals layered over the DARKNOTE palette. Nothing here blocks the interface or runs heavy animation."
-      >
-        <div className="flex flex-wrap gap-2">
-          {(
-            [
-              { key: "on", label: "Enable", icon: Sparkles },
-              { key: "reduced", label: "Reduce animations", icon: Snowflake },
-              { key: "off", label: "Disable", icon: Lock },
-            ] as const
-          ).map((option) => {
-            const Icon = option.icon;
-            const active = mode === option.key;
-            return (
-              <button
-                key={option.key}
-                className={`btn-ghost !py-1.5 text-[11px] ${active ? "border-accent/60 text-white" : ""}`}
-                onClick={() => {
-                  setMode(option.key);
-                  push(
-                    option.key === "off"
-                      ? "Christmas effects off on this device"
-                      : option.key === "reduced"
-                        ? "Reduced animations on this device"
-                        : "Christmas effects on",
-                    "ok",
-                  );
-                }}
-              >
-                {active ? <Check className="h-3.5 w-3.5" /> : <Icon className="h-3.5 w-3.5" />} {option.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="mt-3 space-y-2 text-[11px]">
-          <label className="flex items-center gap-2 text-slate-300">
-            <input type="checkbox" checked={prefs.snow} disabled={mode === "reduced"} onChange={(event) => setSnow(event.target.checked)} />
-            Falling snow (this device)
-          </label>
-          <label className="flex items-center gap-2 text-slate-300">
-            <input type="checkbox" checked={prefs.intro} onChange={(event) => setIntro(event.target.checked)} />
-            Animated DARKNOTE introduction on first open
-          </label>
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <button className="btn-ghost !py-1 text-[11px]" onClick={replayIntro}>
-              <Sparkles className="h-3 w-3" /> Replay intro now
-            </button>
-            <span className="text-slate-600">
-              The introduction is remembered per device; it never repeats unless you ask.
-            </span>
-          </div>
-          <p className="text-slate-600">
-            Reduced-motion is honoured automatically: when your operating system asks for less motion, snow and light
-            animations are switched off regardless of this setting.
-          </p>
-        </div>
-
-        <div className="mt-4 border-t border-ink-750/60 pt-3">
-          <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Platform default</p>
-          <p className="mt-1 text-[11px] text-slate-500">
-            Applied to visitors who have not chosen their own setting on this device.
-          </p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {(
-              [
-                { key: "on", label: "On" },
-                { key: "reduced", label: "Reduced" },
-                { key: "off", label: "Off" },
-              ] as const
-            ).map((option) => (
-              <button
-                key={option.key}
-                className={`btn-ghost !py-1 text-[11px] ${
-                  platform.settings?.appearance.christmasEffects === option.key ? "border-accent/60 text-white" : ""
-                }`}
-                disabled={busy !== null}
-                onClick={() => void saveDefault({ christmasEffects: option.key }, `mode-${option.key}`)}
-              >
-                {busy === `mode-${option.key}` ? <Spinner /> : <Palette className="h-3 w-3" />} {option.label}
-              </button>
-            ))}
-            <button
-              className="btn-ghost !py-1 text-[11px]"
-              disabled={busy !== null}
-              onClick={() =>
-                void saveDefault(
-                  { animatedIntro: !platform.settings?.appearance.animatedIntro },
-                  "intro",
-                )
-              }
-            >
-              {busy === "intro" ? <Spinner /> : <Sparkles className="h-3 w-3" />} Intro{" "}
-              {platform.settings?.appearance.animatedIntro ? "on" : "off"}
-            </button>
-          </div>
-          {!platform.settings && platform.error && <p className="mt-2 text-[11px] text-rose-300">{platform.error}</p>}
-        </div>
-      </Panel>
-    </div>
-  );
 }
 
 // --------------------------------------------------------------- biometric

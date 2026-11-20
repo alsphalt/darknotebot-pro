@@ -10,12 +10,19 @@ import { apiPost, errorMessage } from "@/lib/client";
 import { useApi } from "@/lib/use-api";
 
 type Line = { ts: number; text: string; level: string };
+
+/**
+ * Lines kept in memory. 600 rows of text is already more than a phone can show,
+ * and every extra row is a DOM node, a layout box and a string held for the life
+ * of the page.
+ */
+const MAX_LINES = 600;
 type Monitor = { console: { streamState: string; streamError: string | null; lines: Line[] }; bot: { state: string } };
 
 export default function ConsolePage() {
   const { activeId, activeServer } = useServers();
   const { push } = useToast();
-  const monitor = useApi<Monitor>(activeId ? `/api/monitor?serverId=${activeId}` : null);
+  const monitor = useApi<Monitor>(activeId ? `/api/monitor?serverId=${activeId}&lines=400` : null);
   const [lines, setLines] = useState<Line[]>([]);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("");
@@ -27,23 +34,90 @@ export default function ConsolePage() {
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (monitor.data?.console.lines) setLines(monitor.data.console.lines);
+    if (monitor.data?.console.lines) setLines(monitor.data.console.lines.slice(-MAX_LINES));
   }, [monitor.data]);
 
+  /**
+   * Live output, batched.
+   *
+   * A busy bot writes several lines a second. The previous version called
+   * `setLines()` (and therefore re-rendered the whole tail) once per line and
+   * copied the 800-entry array every time: on a phone that is a React commit per
+   * log line, which is how a console turns into a space heater and then a dead
+   * renderer.
+   *
+   * Now incoming lines are buffered and flushed four times a second at most, the
+   * tail is capped, and the stream is closed while the tab is hidden — a
+   * background console has nothing to show and no reason to hold a connection
+   * (or its decode buffers) open.
+   */
   useEffect(() => {
     if (!activeId) return;
-    const source = new EventSource(`/api/console?serverId=${activeId}`);
-    source.addEventListener("ready", () => setConnected(true));
-    source.addEventListener("line", (event) => {
-      try {
-        const line = JSON.parse((event as MessageEvent).data) as Line;
-        setLines((current) => [...current.slice(-800), line]);
-      } catch {
-        // Ignore malformed frames.
+
+    let source: EventSource | null = null;
+    let buffer: Line[] = [];
+    let flushTimer: number | null = null;
+    let closed = false;
+
+    const flush = () => {
+      flushTimer = null;
+      if (buffer.length === 0) return;
+      const incoming = buffer;
+      buffer = [];
+      setLines((current) => {
+        const next = current.length + incoming.length > MAX_LINES ? current.concat(incoming) : current.concat(incoming);
+        return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+      });
+    };
+
+    const schedule = () => {
+      if (flushTimer !== null) return;
+      flushTimer = window.setTimeout(flush, 250);
+    };
+
+    const open = () => {
+      if (closed || source) return;
+      const connection = new EventSource(`/api/console?serverId=${activeId}`);
+      source = connection;
+      connection.addEventListener("ready", () => setConnected(true));
+      connection.addEventListener("line", (event) => {
+        try {
+          buffer.push(JSON.parse((event as MessageEvent).data) as Line);
+        } catch {
+          return; // ignore malformed frames
+        }
+        // A burst must not grow an unbounded buffer before the next tick.
+        if (buffer.length >= 120) flush();
+        else schedule();
+      });
+      connection.onerror = () => setConnected(false);
+    };
+
+    const close = () => {
+      if (!source) return;
+      source.close();
+      source = null;
+      setConnected(false);
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        flush();
+        close();
+        return;
       }
-    });
-    source.onerror = () => setConnected(false);
-    return () => source.close();
+      open();
+    };
+
+    open();
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      closed = true;
+      if (flushTimer !== null) window.clearTimeout(flushTimer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      close();
+    };
   }, [activeId]);
 
   /**
@@ -128,7 +202,7 @@ export default function ConsolePage() {
               {visible.map((line, index) => (
                 <div
                   key={`${line.ts}-${index}`}
-                  className={
+                  className={`cv-auto ${
                     line.level === "error"
                       ? "text-rose-300"
                       : line.level === "warn"
@@ -136,7 +210,7 @@ export default function ConsolePage() {
                         : line.level === "system"
                           ? "text-cyber/80"
                           : "text-slate-300"
-                  }
+                  }`}
                 >
                   <span className="mr-2 select-none text-slate-700">{new Date(line.ts).toLocaleTimeString()}</span>
                   {line.text}

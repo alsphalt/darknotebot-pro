@@ -826,3 +826,164 @@ html[data-motion="reduced"] .xmas-snow {
     display: none;
   }
 }
+
+/* ==========================================================================
+   Android rendering budget
+   --------------------------------------------------------------------------
+   A mid-range Android phone gives this app roughly one GPU process and a few
+   hundred megabytes of renderer heap. Everything below is about spending that
+   budget on the dashboard instead of on decoration.
+
+   The rules are deliberately CSS-only: they cannot leak, they cannot run in a
+   timer, and they cost one style recalculation when the viewport changes.
+   ========================================================================== */
+
+/**
+ * 1. No backdrop blur on a phone.
+ *
+ * `backdrop-filter: blur()` on a fixed sidebar or a sticky header makes the
+ * compositor re-read and re-blur the whole surface for every frame that scrolls
+ * underneath it. On desktop that is a nice effect; on a phone it is the single
+ * most expensive thing on the page and a known source of dropped frames, GPU
+ * memory growth and renderer kills. The surfaces keep their dark tint, so the
+ * layout and contrast are unchanged — only the blur is gone.
+ */
+@media (max-width: 1023px) {
+  .backdrop-blur,
+  .backdrop-blur-sm,
+  .backdrop-blur-md,
+  .backdrop-blur-lg,
+  .backdrop-blur-xl,
+  .backdrop-blur-2xl,
+  .backdrop-blur-3xl,
+  .panel,
+  .panel-flat {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+/* Explicit OS preference, on any screen size. */
+@media (prefers-reduced-transparency: reduce) {
+  .backdrop-blur,
+  .backdrop-blur-sm,
+  .backdrop-blur-md,
+  .backdrop-blur-lg,
+  .backdrop-blur-xl,
+  .backdrop-blur-2xl,
+  .backdrop-blur-3xl,
+  .panel {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+/* The in-app "reduced" appearance also drops it: the user asked for calm. */
+html[data-motion="reduced"] .backdrop-blur,
+html[data-motion="reduced"] .backdrop-blur-sm,
+html[data-motion="reduced"] .backdrop-blur-xl,
+html[data-motion="reduced"] .panel {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/**
+ * 2. Off-screen rows are not laid out or painted.
+ *
+ * Log tails, file listings, error rows and project files all render hundreds of
+ * rows; on a phone only six or seven are ever visible. `content-visibility: auto`
+ * skips the engine work for the rest, and `contain-intrinsic-size` keeps the
+ * scrollbar honest so the page does not jump while scrolling.
+ */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 40px;
+}
+.cv-auto-tall {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
+/**
+ * 3. Decoration stops when the document is hidden.
+ *
+ * Chrome throttles timers in a background tab but keeps composited animations
+ * alive; on Android that is CPU (and therefore battery) spent on a screen nobody
+ * is looking at. `data-doc-hidden` is set by the crash sentinel.
+ */
+html[data-doc-hidden="true"] .xmas-ribbon,
+html[data-doc-hidden="true"] .xmas-halo,
+html[data-doc-hidden="true"] .xmas-lights i,
+html[data-doc-hidden="true"] .xmas-brand,
+html[data-doc-hidden="true"] .bb-orb::before,
+html[data-doc-hidden="true"] .bb-orb::after,
+html[data-doc-hidden="true"] .bb-orb-mist span,
+html[data-doc-hidden="true"] .bb-stage::after,
+html[data-doc-hidden="true"] .bb-collision,
+html[data-doc-hidden="true"] .bb-word-down,
+html[data-doc-hidden="true"] .bb-word-up,
+html[data-doc-hidden="true"] .animate-spin,
+html[data-doc-hidden="true"] .animate-pulse {
+  animation-play-state: paused !important;
+}
+
+/**
+ * 4. The BIGBROTHER identity on small screens.
+ *
+ * It draws six copies of the word, each with a blur filter, plus a grain layer
+ * with `mix-blend-mode`. The blurred copies are what force large intermediate
+ * surfaces; at phone width the effect is barely visible behind the panel anyway.
+ * The two outermost (18px blur) layers and the blend-mode grain are dropped, and
+ * the remaining cycle is slowed so the compositor wakes less often.
+ */
+@media (max-width: 767px) {
+  .bb-depth-3,
+  .bb-grain {
+    display: none !important;
+  }
+  .bb-depth-2 {
+    filter: blur(4px);
+    opacity: 0.28;
+  }
+  .bb-collision {
+    filter: blur(16px);
+  }
+  .bb-stage {
+    --bb-cycle: 34s;
+  }
+  .bb-orb::after,
+  .bb-orb-mist span {
+    filter: blur(4px);
+  }
+}
+
+/**
+ * 5. User-level and OS-level reduced motion, for every decorative animation —
+ *    including the ones that only run inside a component.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .bb-collision,
+  .bb-word-down,
+  .bb-word-up,
+  .bb-stage::after,
+  .bb-orb::before,
+  .bb-orb::after,
+  .bb-orb-mist span,
+  .xmas-ribbon,
+  .xmas-halo,
+  .xmas-lights i {
+    animation: none !important;
+  }
+  html {
+    scroll-behavior: auto !important;
+  }
+}
+
+html[data-motion="reduced"] .bb-collision,
+html[data-motion="reduced"] .bb-word-down,
+html[data-motion="reduced"] .bb-word-up,
+html[data-motion="reduced"] .bb-orb::before,
+html[data-motion="reduced"] .bb-orb::after,
+html[data-motion="reduced"] .bb-orb-mist span {
+  animation: none !important;
+}

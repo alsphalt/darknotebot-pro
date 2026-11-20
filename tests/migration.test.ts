@@ -78,10 +78,19 @@ test('a database created before pending_delete existed migrates instead of faili
       `select indexname from pg_indexes where indexname = 'imported_project_files_pending_delete_idx'`,
     );
     assert.equal(index.rows.length, 1, 'the partial index must exist after migration');
-    const markers = await check.query<{ version: number }>('select version from schema_migrations');
-    assert.deepEqual(
-      markers.rows.map((row) => Number(row.version)),
-      [5],
+    /**
+     * The registry moved from `schema_migrations` (a single version integer) to
+     * `db_migrations` (one row per applied file, with a checksum). A database
+     * that only knows the old table is adopted: the baseline is recorded without
+     * being re-run, and every later migration is applied on top of it.
+     */
+    const registry = await check.query<{ name: string }>(
+      'select name from db_migrations order by name',
+    );
+    assert.equal(registry.rows[0]?.name, '0001_baseline', 'the baseline must be recorded');
+    assert.ok(
+      registry.rows.some((row) => row.name === '0002_operational_indexes'),
+      'later migrations must be applied to an adopted database',
     );
     // The column the query layer writes through is usable, with its default.
     const column = await check.query<{ column_default: string | null }>(

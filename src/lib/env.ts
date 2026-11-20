@@ -20,8 +20,25 @@ export const env = {
   pgliteDir: path.join(dataDir, 'pglite'),
 
   databaseUrl: process.env.DATABASE_URL ?? '',
+  /**
+   * `require` (default) verifies the certificate — what Neon serves. `no-verify`
+   * is for a proxy with a private CA; `disable` is for a local socket.
+   */
   databaseSsl: (process.env.DATABASE_SSL ?? 'require').toLowerCase(),
-  dbDriver: (process.env.DARKNOTE_DB_DRIVER ?? 'auto').toLowerCase() as 'auto' | 'neon' | 'pglite',
+  /**
+   * postgres | neon | pglite | auto
+   *
+   * `postgres` is node-postgres over TCP (works with Neon's pooled endpoint,
+   * a self-hosted server or CI). `neon` uses @neondatabase/serverless over a
+   * WebSocket. `auto` picks the WebSocket driver only for a neon.tech host on a
+   * serverless platform, and TCP everywhere else.
+   */
+  dbDriver: (process.env.DARKNOTE_DB_DRIVER ?? 'auto').toLowerCase() as
+    | 'auto'
+    | 'neon'
+    | 'postgres'
+    | 'pg'
+    | 'pglite',
 
   adminEmail: process.env.DARKNOTE_ADMIN_EMAIL ?? '',
   adminPassword: process.env.DARKNOTE_ADMIN_PASSWORD ?? '',

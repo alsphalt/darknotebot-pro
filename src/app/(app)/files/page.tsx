@@ -273,7 +273,7 @@ function FilesView() {
                   </tr>
                 )}
                 {entries.map((entry) => (
-                  <tr key={entry.path} className="table-row">
+                  <tr key={entry.path} className="table-row cv-auto">
                     <td className="px-3 py-2">
                       <input type="checkbox" checked={selected.has(entry.path)} onChange={() => toggle(entry.path)} />
                     </td>

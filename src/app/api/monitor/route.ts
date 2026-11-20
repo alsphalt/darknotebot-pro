@@ -14,12 +14,16 @@ export const dynamic = 'force-dynamic';
  * are collected from the panel on every call — nothing is cached or simulated.
  */
 export const GET = route({ permission: 'console.read' }, async ({ req, user }) => {
-  const serverId = new URL(req.url).searchParams.get('serverId');
+  const params = new URL(req.url).searchParams;
+  const serverId = params.get('serverId');
   if (!serverId) throw new ApiError('serverId is required', 400, 'server_required');
+  // Only the terminal needs a long tail; every other page polls for the badges.
+  const requestedLines = Number(params.get('lines') ?? '');
+  const lineLimit = Number.isFinite(requestedLines) && requestedLines > 0 ? Math.floor(requestedLines) : 120;
   const server = await assertServerAccess(user, serverId, 'console.read');
   // Attaching is cheap and idempotent; it is what keeps the console tail alive.
   attachConsole(server);
-  const payload = await buildMonitor(server);
+  const payload = await buildMonitor(server, { lineLimit });
   return ok(payload);
 });
 

@@ -131,7 +131,16 @@ export type MonitorPayload = {
  * Container state and WhatsApp state are reported separately and never conflated:
  * a running container does not prove the WhatsApp session is connected.
  */
-export async function buildMonitor(server: ServerRecord): Promise<MonitorPayload> {
+/**
+ * `lineLimit` bounds the console tail carried by the monitor payload.
+ *
+ * The tail used to be a fixed 400 lines on every poll. On a phone that payload is
+ * parsed, retained by the response cache and re-rendered every ten seconds; a
+ * busy bot can make each line a couple of hundred characters, so 400 of them is
+ * a hundred kilobytes of JSON per tick. Callers that only need the state badge
+ * ask for a handful; the terminal asks for the full tail once.
+ */
+export async function buildMonitor(server: ServerRecord, options: { lineLimit?: number } = {}): Promise<MonitorPayload> {
   let status: Awaited<ReturnType<typeof refreshStatus>> | null = null;
   let panelError: string | null = null;
 
@@ -233,7 +242,7 @@ export async function buildMonitor(server: ServerRecord): Promise<MonitorPayload
       streamState: buffer.error && consoleState === 'error' ? 'error' : consoleState === 'live' ? 'live' : consoleState,
       streamError: buffer.error,
       attached: consoleState === 'live' || consoleState === 'connecting' || consoleState === 'reconnecting',
-      lines: lines.slice(-400),
+      lines: lines.slice(-Math.max(1, Math.min(400, options.lineLimit ?? 120))),
     },
     editor: {
       limitBytes: editorLimitFor(server),

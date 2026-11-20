@@ -227,6 +227,9 @@ export async function createMockGitHub({
       const replaced = new Set(Object.keys(changed));
       const next = entriesNow.filter((entry) => !replaced.has(entry.path));
       for (const [filePath, content] of Object.entries(changed)) {
+        // `null` means the file was deleted in that commit: it is already gone
+        // from `next` because it is in `replaced`.
+        if (content === null) continue;
         const buffer = Buffer.from(content, 'utf8');
         const sha = blobSha(buffer);
         state.blobs.set(sha, buffer);
