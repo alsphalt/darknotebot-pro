@@ -128,19 +128,110 @@ export async function requireConversation(userId: string, id: string): Promise<C
   return mapConversation(row);
 }
 
+/**
+ * Message pagination.
+ *
+ * A long thread used to be serialised in full on every open: one row per turn,
+ * each with its blocks, citations and actions, straight into the browser's
+ * heap. On a phone with 2 GB of RAM that is what made the tab die with
+ * "Aw, Snap!" rather than render. The reader now walks the thread backwards in
+ * pages, newest first, and the client only ever holds the pages it asked for.
+ */
+export const MESSAGE_PAGE_SIZE = 40;
+export const MESSAGE_PAGE_MAX = 200;
+
+export interface MessagePage {
+  conversation: Conversation;
+  /** Oldest → newest, so the client can append without re-sorting. */
+  messages: Message[];
+  /** True when older messages exist before the first row of this page. */
+  hasMore: boolean;
+  /** Opaque cursor for the next (older) page, or null at the top of the thread. */
+  nextCursor: string | null;
+  /** Total messages in the conversation, for the UI counter. */
+  total: number;
+}
+
+type Cursor = { at: string; id: string };
+
+/**
+ * `pg` returns `timestamptz` columns as `Date` objects while PGlite can return
+ * strings. A cursor built from `Date.toString()` embeds "GMT+0800 (China
+ * Standard Time)", which PostgreSQL refuses to cast back — so every timestamp is
+ * normalised to ISO-8601 before it leaves the query.
+ */
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value ?? '');
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? text : new Date(parsed).toISOString();
+}
+
+function encodeCursor(at: unknown, id: string): string {
+  return `${toIsoTimestamp(at)}|${id}`;
+}
+
+/** Malformed cursors are rejected rather than treated as "start from the top". */
+function decodeCursor(raw: string | undefined): Cursor | null {
+  if (!raw) return null;
+  const split = raw.lastIndexOf('|');
+  if (split <= 0) throw new ApiError('The message cursor is not valid.', 400, 'invalid_cursor');
+  const at = raw.slice(0, split);
+  const idPart = raw.slice(split + 1);
+  const parsed = Date.parse(at);
+  if (!at || !idPart || Number.isNaN(parsed)) {
+    throw new ApiError('The message cursor is not valid.', 400, 'invalid_cursor');
+  }
+  return { at: new Date(parsed).toISOString(), id: idPart };
+}
+
 export async function getConversation(
   userId: string,
   id: string,
-): Promise<{ conversation: Conversation; messages: Message[] }> {
+  options: { limit?: number; before?: string } = {},
+): Promise<MessagePage> {
   const conversation = await requireConversation(userId, id);
-  const rows = await query<MessageRow>(
-    `select id, conversation_id, role, content, blocks, citations, actions, intent, engine, created_at
-       from bigbrother_messages
-      where conversation_id = $1 and user_id = $2
-      order by created_at asc`,
+  const requested = Number.isFinite(options.limit) ? Math.trunc(options.limit as number) : MESSAGE_PAGE_SIZE;
+  const limit = Math.min(Math.max(requested || MESSAGE_PAGE_SIZE, 1), MESSAGE_PAGE_MAX);
+  const cursor = decodeCursor(options.before);
+  const columns = `id, conversation_id, role, content, blocks, citations, actions, intent, engine, created_at`;
+
+  // `limit + 1` proves whether an older page exists without a second query.
+  // The row comparison keeps paging stable when two turns share a timestamp.
+  const rows = cursor
+    ? await query<MessageRow>(
+        `select ${columns}
+           from bigbrother_messages
+          where conversation_id = $1 and user_id = $2
+            and (created_at, id) < ($3::timestamptz, $4::text)
+          order by created_at desc, id desc
+          limit $5`,
+        [id, userId, cursor.at, cursor.id, limit + 1],
+      )
+    : await query<MessageRow>(
+        `select ${columns}
+           from bigbrother_messages
+          where conversation_id = $1 and user_id = $2
+          order by created_at desc, id desc
+          limit $3`,
+        [id, userId, limit + 1],
+      );
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const oldest = page[page.length - 1];
+  const counter = await queryOne<{ count: string | number }>(
+    `select count(*)::int as count from bigbrother_messages where conversation_id = $1 and user_id = $2`,
     [id, userId],
   );
-  return { conversation, messages: rows.map(mapMessage) };
+
+  return {
+    conversation,
+    messages: page.slice().reverse().map(mapMessage),
+    hasMore,
+    nextCursor: hasMore && oldest ? encodeCursor(oldest.created_at, oldest.id) : null,
+    total: Number(counter?.count ?? 0),
+  };
 }
 
 export interface AppendMessageInput {

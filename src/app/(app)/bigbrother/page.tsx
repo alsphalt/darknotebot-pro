@@ -50,6 +50,20 @@ type Status = {
 
 type Asset = { id: string; url: string; filename: string };
 
+/** One page of a thread, as returned by the conversations endpoint. */
+type ThreadPage = {
+  conversation: Conversation;
+  messages: Message[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  total: number;
+};
+
+/** Messages fetched per request when scrolling back through a thread. */
+const THREAD_PAGE_SIZE = 40;
+/** Hard ceiling for messages held in the browser, however far back the user pages. */
+const MAX_THREAD_MESSAGES = 240;
+
 const SUGGESTIONS = [
   "Where can I find my plugins?",
   "How do I restart my bot?",
@@ -98,6 +112,9 @@ function BigBrotherView() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const [totalMessages, setTotalMessages] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [tutorialsOpen, setTutorialsOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
@@ -119,11 +136,24 @@ function BigBrotherView() {
     }
   }, []);
 
+  /**
+   * Thread loading is paged.
+   *
+   * The workspace used to request the whole conversation and keep it in React
+   * state; a few thousand turns of answers with blocks and citations is tens of
+   * megabytes of JS objects, which is what an Android renderer answers with
+   * "Aw, Snap!". One page at a time keeps the heap flat while every message
+   * stays reachable through "Load earlier".
+   */
   const loadThread = useCallback(async (id: string) => {
     setLoadingThread(true);
     try {
-      const data = await api<{ conversation: Conversation; messages: Message[] }>(`/api/bigbrother/conversations/${id}`);
-      setMessages(data.messages);
+      const data = await api<ThreadPage>(
+        `/api/bigbrother/conversations/${id}?limit=${THREAD_PAGE_SIZE}`,
+      );
+      setMessages(data.messages.slice(-MAX_THREAD_MESSAGES));
+      setOlderCursor(data.nextCursor);
+      setTotalMessages(data.total);
       setActiveId(id);
     } catch (error) {
       push(errorMessage(error), "error");
@@ -132,6 +162,23 @@ function BigBrotherView() {
       setLoadingThread(false);
     }
   }, [push]);
+
+  const loadEarlier = useCallback(async () => {
+    if (!activeId_ || !olderCursor || loadingEarlier) return;
+    setLoadingEarlier(true);
+    try {
+      const data = await api<ThreadPage>(
+        `/api/bigbrother/conversations/${activeId_}?limit=${THREAD_PAGE_SIZE}&before=${encodeURIComponent(olderCursor)}`,
+      );
+      setMessages((current) => [...data.messages, ...current].slice(-MAX_THREAD_MESSAGES));
+      setOlderCursor(data.nextCursor);
+      setTotalMessages(data.total);
+    } catch (error) {
+      push(errorMessage(error), "error");
+    } finally {
+      setLoadingEarlier(false);
+    }
+  }, [activeId_, olderCursor, loadingEarlier, push]);
 
   useEffect(() => {
     void (async () => {
@@ -167,6 +214,8 @@ function BigBrotherView() {
   const startNew = () => {
     setActiveId(null);
     setMessages([]);
+    setOlderCursor(null);
+    setTotalMessages(0);
     setSidebarOpen(false);
     router.replace("/bigbrother");
     textarea.current?.focus();
@@ -428,6 +477,22 @@ function BigBrotherView() {
                   <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading conversation…
                 </p>
               )}
+
+              {olderCursor ? (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => void loadEarlier()}
+                    disabled={loadingEarlier}
+                    className="btn-ghost !py-1.5 text-[11px] disabled:opacity-60"
+                  >
+                    {loadingEarlier ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowUp className="h-3 w-3" />}
+                    {loadingEarlier
+                      ? "Loading earlier messages…"
+                      : `Load earlier messages${totalMessages ? ` (${Math.max(0, totalMessages - messages.length)} older)` : ""}`}
+                  </button>
+                </div>
+              ) : null}
 
               {messages.map((message) =>
                 message.role === "user" ? (

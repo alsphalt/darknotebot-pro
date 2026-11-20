@@ -34,6 +34,12 @@ type ConversationRow = { id: string; messageCount: number; updatedAt: string };
 const SUGGESTIONS = ["How do I restart my bot?", "Why is Live Monitor showing Unknown?", "Where is my main.js?"];
 
 /**
+ * Messages the overlay keeps in memory. The full thread lives in PostgreSQL and
+ * is paged by the workspace view; the overlay only needs the recent context.
+ */
+const PANEL_HISTORY_LIMIT = 60;
+
+/**
  * The floating BIGBROTHER assistant.
  *
  * Compact overlay, not a page: it reuses the same chat endpoint, the same
@@ -51,6 +57,7 @@ export function BigBrotherPanel({ open, onClose }: { open: boolean; onClose: () 
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [historyTruncated, setHistoryTruncated] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const loadedHistory = useRef(false);
@@ -72,6 +79,10 @@ export function BigBrotherPanel({ open, onClose }: { open: boolean; onClose: () 
 
   // The most recent conversation is restored, so the panel continues the thread
   // the user already had instead of starting from nothing.
+  //
+  // Only the newest page is requested: a compact overlay that pulled a 2,000
+  // turn thread into memory was the single largest client allocation in the
+  // console, and it stayed resident for the whole session.
   useEffect(() => {
     if (!open || loadedHistory.current) return;
     loadedHistory.current = true;
@@ -81,14 +92,16 @@ export function BigBrotherPanel({ open, onClose }: { open: boolean; onClose: () 
         const list = await apiGet<{ conversations: ConversationRow[] }>("/api/bigbrother/conversations");
         const latest = list.conversations[0];
         if (!latest || latest.messageCount === 0) return;
-        const detail = await apiGet<{ messages: PanelMessage[] }>(
-          `/api/bigbrother/conversations/${latest.id}`,
+        const detail = await apiGet<{ messages: PanelMessage[]; hasMore?: boolean }>(
+          `/api/bigbrother/conversations/${latest.id}?limit=${PANEL_HISTORY_LIMIT}`,
         );
         if (cancelled) return;
         setConversationId(latest.id);
+        setHistoryTruncated(Boolean(detail.hasMore));
         setMessages(
           detail.messages
             .filter((message) => message.role === "user" || message.role === "assistant")
+            .slice(-PANEL_HISTORY_LIMIT)
             .map((message) => ({
               id: message.id,
               role: message.role as "user" | "assistant",
@@ -105,6 +118,23 @@ export function BigBrotherPanel({ open, onClose }: { open: boolean; onClose: () 
     return () => {
       cancelled = true;
     };
+  }, [open]);
+
+  /**
+   * Release the thread when the overlay closes.
+   *
+   * `BigBrotherPanel` is mounted by the app shell for the whole session, so
+   * whatever it holds stays in the heap until the tab dies. Dropping the
+   * messages on close (and letting the next open re-read the newest page from
+   * the database) keeps that cost at one page instead of one conversation.
+   */
+  useEffect(() => {
+    if (open) return;
+    loadedHistory.current = false;
+    setMessages([]);
+    setConversationId(null);
+    setHistoryTruncated(false);
+    setError(null);
   }, [open]);
 
   useEffect(() => {
@@ -269,6 +299,13 @@ export function BigBrotherPanel({ open, onClose }: { open: boolean; onClose: () 
               </p>
             ) : null}
           </div>
+        ) : null}
+
+        {historyTruncated ? (
+          <p className="rounded-lg border border-ink-700/70 bg-ink-900/60 px-2.5 py-2 text-[10.5px] leading-relaxed text-slate-500">
+            Showing the last {PANEL_HISTORY_LIMIT} messages. Older turns are kept in the database and are available in
+            the full BIGBROTHER workspace.
+          </p>
         ) : null}
 
         {messages.map((message) =>

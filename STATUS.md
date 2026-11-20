@@ -47,6 +47,78 @@ drifted database before the fix (500 `column "pending_delete" does not exist`)
 and confirmed 200 after it; `/sys` (read-only) also falls back and reports
 `storage: ok`.
 
+## This pass — Android stability: bounded history, error containment, polling discipline
+
+Reported symptom: Chrome for Android eventually kills the tab with `Aw, Snap!`.
+There is no crash log from a real device in this repository, so this pass fixes the
+causes that are provable from the code rather than claiming a single culprit.
+
+### What was actually unbounded
+
+- **BIGBROTHER history.** `getConversation` selected every row of a thread and the
+  API serialised all of them; the full workspace and the always-mounted floating
+  panel both kept the whole array in React state. A long thread of answers with
+  blocks and citations is tens of megabytes of JS objects, and the renderer is the
+  first thing Android reclaims.
+- **`useApi` cache.** Sixty entries with no size accounting. One cached
+  `/api/monitor` payload carries the console tail, so a browsing session could pin
+  several megabytes for the life of the tab.
+- **Polling while hidden.** `refreshMs` timers kept firing in background tabs, so a
+  dashboard left open kept hitting the panel and the database.
+- **Console auto-scroll.** `scrollIntoView({ behavior: "smooth" })` ran once per log
+  line, restarting a compositor animation for every line a busy bot printed.
+- **No error boundary existed anywhere.** One throw during render unmounted the
+  entire tree, which on a phone is indistinguishable from a crash and takes the
+  navigation with it.
+
+### What changed
+
+- `bigbrother/memory.ts`: `getConversation` now pages newest-first with
+  `limit` (1-200, default 40) and an opaque `before` cursor built from
+  `(created_at, id)`. It returns `hasMore`, `nextCursor` and `total`. The cursor is
+  normalised to ISO-8601 because `pg` hands back `Date` objects for `timestamptz`.
+- `api/bigbrother/conversations/[id]`: accepts `limit` and `before`, rejects a
+  malformed cursor with 400 instead of silently restarting at the top.
+- BIGBROTHER workspace: loads 40 messages, "Load earlier messages" prepends the
+  previous page, hard ceiling of 240 messages in memory.
+- Floating panel: loads the last 60 messages, and **releases them when closed** —
+  the panel is mounted by the app shell for the whole session.
+- `lib/use-api.ts`: cache is bounded by retained bytes (3 MB) as well as entries
+  (30), evicting least-recently-fetched first; polling stops on `visibilitychange`
+  and runs one fresh read when the page returns.
+- Console: tail following writes `scrollTop` instead of starting a smooth scroll
+  per line.
+- New error containment: `components/error-boundary.tsx` (reusable, reports the
+  component stack to `/api/errors/report`), `app/error.tsx`,
+  `app/(app)/error.tsx` (keeps the sidebar and session), `app/global-error.tsx`
+  (inline styles, no providers) and `app/not-found.tsx`. The workspace layout wraps
+  page content in a boundary, so a failing page no longer takes the shell down.
+
+### Verified in this pass
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **135 passing** (134 before this pass, plus a new pagination test that
+  proves newest-first ordering, a working cursor across three pages, no gaps, no
+  duplicates, clamping and cursor rejection).
+- `npm run build`: production build succeeds.
+- `npm start` smoke test with a real seeded account: login 200, dashboard 200,
+  `/api/servers` 200, unauthenticated API 401, `/api/monitor` without `serverId`
+  400, unknown route renders the new 404 page, `/manifest.webmanifest` and `/sw.js`
+  200.
+- Pagination over HTTP on the running server: 2-message thread with `limit=1`
+  returned one message, `hasMore: true` and an ISO cursor; the `before` page
+  returned the older message with `hasMore: false`; `before=garbage` returned 400.
+
+### Not verified here
+
+- **A physical Android device.** Chrome for Android, the installed PWA and an
+  Android WebView were not available in this environment, so the memory profile
+  after a long session, the animation cost and `Aw, Snap!` itself are not measured
+  here. What can be said is that the unbounded allocations above are gone.
+- **A live Neon instance.** No `DATABASE_URL` was supplied, so the database layer
+  was exercised against PGlite (the same SQL engine in WASM). Neon itself, pooling
+  limits and connection exhaustion under serverless were not re-tested in this pass.
+
 ## This pass — GitHub & file import, CRASH AND FIX, automatic synchronization
 
 ### Import

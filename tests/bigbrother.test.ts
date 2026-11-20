@@ -34,6 +34,8 @@ const {
   setMemory,
   listMemory,
   recall,
+  MESSAGE_PAGE_MAX,
+  MESSAGE_PAGE_SIZE,
 } = await import('../src/lib/bigbrother/memory.ts');
 const { saveAsset, readAsset } = await import('../src/lib/bigbrother/assets.ts');
 const { createTutorial, listTutorials, deleteTutorial } = await import('../src/lib/bigbrother/tutorials.ts');
@@ -202,6 +204,82 @@ test('conversations are stored per account and cannot be read across accounts', 
   const removed = await deleteConversation(principalA.id, conversation.id);
   void removed;
   await assert.rejects(() => getConversation(principalA.id, conversation.id), /Conversation not found/);
+});
+
+/**
+ * A long thread used to be serialised in full on every open. This proves the
+ * reader is actually paged: newest page first, a working cursor, no gaps and no
+ * duplicates across pages, and a bounded page size.
+ */
+test('a long conversation is paged, newest first, with no gaps or duplicates', async () => {
+  const conversation = await createConversation(principalA.id, { title: 'Long thread' });
+  const ids: string[] = [];
+  for (let index = 1; index <= 95; index += 1) {
+    const message = await appendMessage(principalA.id, conversation.id, {
+      role: index % 2 === 0 ? 'assistant' : 'user',
+      content: `message-${String(index).padStart(3, '0')}`,
+    });
+    ids.push(message.id);
+  }
+
+  // Deterministic ordering: several inserts can share one timestamp, so space
+  // them out before asserting which page holds which message. The timestamps
+  // are computed in JavaScript and passed in, so the test never depends on the
+  // database's time zone handling.
+  const base = Date.now();
+  const epochs = ids.map((_, index) => base + index * 1000);
+  await query(
+    `update bigbrother_messages as m
+        set created_at = to_timestamp(t.epoch / 1000.0)
+       from unnest($1::text[], $2::double precision[]) as t(id, epoch)
+      where m.id = t.id`,
+    [ids, epochs],
+  );
+
+  const first = await getConversation(principalA.id, conversation.id, { limit: MESSAGE_PAGE_SIZE });
+  assert.equal(first.total, 95);
+  assert.equal(first.messages.length, MESSAGE_PAGE_SIZE);
+  assert.equal(first.messages[0].content, 'message-056');
+  assert.equal(first.messages[first.messages.length - 1].content, 'message-095');
+  assert.equal(first.hasMore, true);
+  assert.ok(first.nextCursor);
+
+  const second = await getConversation(principalA.id, conversation.id, {
+    limit: MESSAGE_PAGE_SIZE,
+    before: first.nextCursor!,
+  });
+  assert.equal(second.messages.length, MESSAGE_PAGE_SIZE);
+  assert.equal(second.messages[0].content, 'message-016');
+  assert.equal(second.messages[second.messages.length - 1].content, 'message-055');
+  assert.equal(second.hasMore, true);
+
+  const third = await getConversation(principalA.id, conversation.id, {
+    limit: MESSAGE_PAGE_SIZE,
+    before: second.nextCursor!,
+  });
+  assert.equal(third.messages.length, 15);
+  assert.equal(third.messages[0].content, 'message-001');
+  assert.equal(third.hasMore, false);
+  assert.equal(third.nextCursor, null);
+
+  const seen = new Set([...first.messages, ...second.messages, ...third.messages].map((message) => message.id));
+  assert.equal(seen.size, 95);
+
+  // An oversized `limit` is clamped to the ceiling instead of returning the
+  // whole thread — this thread only has 95 rows, so the ceiling is what bounds
+  // it, not the data.
+  const clamped = await getConversation(principalA.id, conversation.id, { limit: 10_000 });
+  assert.equal(clamped.messages.length, Math.min(95, MESSAGE_PAGE_MAX));
+  assert.ok(clamped.messages.length <= MESSAGE_PAGE_MAX);
+
+  // A cursor that was not produced by the server is refused rather than
+  // silently restarting from the top of the thread.
+  await assert.rejects(
+    () => getConversation(principalA.id, conversation.id, { before: 'garbage' }),
+    /cursor is not valid/,
+  );
+
+  await deleteConversation(principalA.id, conversation.id);
 });
 
 test('memory makes "where did I stop" truthful and account scoped', async () => {

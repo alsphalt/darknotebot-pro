@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ok, route } from '@/lib/api';
 import {
+  MESSAGE_PAGE_SIZE,
   deleteConversation,
   getConversation,
   renameConversation,
@@ -11,8 +12,22 @@ export const dynamic = 'force-dynamic';
 
 type Params = { id: string };
 
-export const GET = route<Params>({ permission: null }, async ({ params, user }) => {
-  const result = await getConversation(user.id, params.id);
+/**
+ * One page of a thread.
+ *
+ * Query parameters:
+ *   limit  — messages per page (1-200, default 40)
+ *   before — opaque `nextCursor` from the previous page, for older messages
+ *
+ * The response always contains the newest page when `before` is absent, so a
+ * phone never has to download a whole conversation to show the last turn.
+ */
+export const GET = route<Params>({ permission: null }, async ({ params, req, user }) => {
+  const search = new URL(req.url).searchParams;
+  const rawLimit = Number(search.get('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.trunc(rawLimit) : MESSAGE_PAGE_SIZE;
+  const before = search.get('before') ?? undefined;
+  const result = await getConversation(user.id, params.id, { limit, before });
   return ok(result);
 });
 

@@ -46,8 +46,18 @@ export default function ConsolePage() {
     return () => source.close();
   }, [activeId]);
 
+  /**
+   * Follow the tail without an animation per line.
+   *
+   * A busy bot prints many lines a second, and `scrollIntoView({ behavior:
+   * "smooth" })` restarted a compositor animation for every one of them — the
+   * console spent its whole frame budget animating a scrollbar. Writing
+   * `scrollTop` is one layout pass and lands in the same place.
+   */
   useEffect(() => {
-    if (autoScroll) bottom.current?.scrollIntoView({ behavior: "smooth" });
+    if (!autoScroll) return;
+    const scroller = bottom.current?.parentElement;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, [lines, autoScroll]);
 
   const visible = useMemo(

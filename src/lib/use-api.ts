@@ -23,20 +23,53 @@ import { apiGet, errorMessage } from "./client";
 interface Entry {
   data: unknown;
   at: number;
+  /** Approximate retained bytes, used to bound the whole cache. */
+  bytes: number;
 }
 
 const cache = new Map<string, Entry>();
 const inFlight = new Map<string, Promise<unknown>>();
 
-/** Keep the cache small: this is a convenience layer, not a data store. */
-const MAX_ENTRIES = 60;
+/**
+ * Keep the cache small: this is a convenience layer, not a data store.
+ *
+ * Counting entries is not enough. A single `/api/monitor` payload carries the
+ * console tail, so sixty "small" entries could pin several megabytes of JS
+ * objects for the lifetime of the tab — on a low-RAM Android device that is
+ * how a page that worked for ten minutes dies on the eleventh. The cache is now
+ * bounded by retained bytes as well as by count, and the oldest entry is
+ * dropped first.
+ */
+const MAX_ENTRIES = 30;
+const MAX_BYTES = 3 * 1024 * 1024;
+
+function estimateBytes(data: unknown): number {
+  if (data === null || data === undefined) return 0;
+  try {
+    const json = JSON.stringify(data);
+    // Two bytes per UTF-16 code unit plus object overhead.
+    return json ? json.length * 2 + 128 : 0;
+  } catch {
+    return 256 * 1024;
+  }
+}
+
+function totalBytes(): number {
+  let sum = 0;
+  for (const entry of cache.values()) sum += entry.bytes;
+  return sum;
+}
 
 function remember(url: string, data: unknown): void {
-  if (cache.size >= MAX_ENTRIES) {
-    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-    if (oldest) cache.delete(oldest[0]);
+  cache.set(url, { data, at: Date.now(), bytes: estimateBytes(data) });
+  if (cache.size <= MAX_ENTRIES && totalBytes() <= MAX_BYTES) return;
+  // Evict least-recently-fetched entries until both budgets are satisfied.
+  const ordered = [...cache.entries()].sort((a, b) => a[1].at - b[1].at);
+  for (const [key] of ordered) {
+    if (cache.size <= MAX_ENTRIES && totalBytes() <= MAX_BYTES) break;
+    if (key === url) continue;
+    cache.delete(key);
   }
-  cache.set(url, { data, at: Date.now() });
 }
 
 /** Drop cached responses (used after a write that is known to change them). */
@@ -126,10 +159,44 @@ export function useApi<T>(
     void load(false);
   }, [load, skipCache, url]);
 
+  /**
+   * Polling stops while the page is hidden.
+   *
+   * Android keeps background tabs alive long enough for their timers to fire,
+   * so a dashboard left open in another tab kept hitting the panel and the
+   * database — and kept its JSON in this cache — for no benefit. The timer is
+   * dropped on `hidden` and one fresh read runs when the page comes back.
+   */
   useEffect(() => {
-    if (!options.refreshMs || !url) return;
-    const timer = setInterval(() => void load(true), options.refreshMs);
-    return () => clearInterval(timer);
+    const every = options.refreshMs;
+    if (!every || !url) return;
+
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const start = () => {
+      if (timer) return;
+      timer = setInterval(() => void load(true), every);
+    };
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    const onVisibility = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) {
+        stop();
+        return;
+      }
+      start();
+      void load(true);
+    };
+
+    if (typeof document === "undefined" || !document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load, options.refreshMs, url]);
 
   return { data, error, loading, refresh, setData };
