@@ -697,3 +697,46 @@ export async function listProjectSummaries(): Promise<ProjectSummary[]> {
 export function parseDetail(value: unknown): Record<string, unknown> {
   return parseJsonb<Record<string, unknown>>(value, {});
 }
+
+/** Paths only: used by import finalisation to find stale rows without loading contents. */
+export async function listProjectFilePaths(projectId: string): Promise<string[]> {
+  const rows = await query<{ path: string }>(
+    `select path from imported_project_files where project_id = $1 order by path asc`,
+    [projectId],
+  );
+  return rows.map((row) => row.path);
+}
+
+/**
+ * Bulk upsert for batched imports.
+ *
+ * Sequential on purpose: a batch is small (tens of files), and one statement per
+ * file keeps the existing change detection (`changed`) and the dirty-flag rules
+ * in exactly one place.
+ */
+export async function upsertProjectFiles(
+  projectId: string,
+  files: Array<{
+    path: string;
+    content: string | null;
+    sizeBytes: number;
+    sha256: string | null;
+    remoteSha: string | null;
+  }>,
+): Promise<number> {
+  let written = 0;
+  for (const file of files) {
+    await upsertProjectFile({
+      projectId,
+      path: file.path,
+      content: file.content,
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+      remoteSha: file.remoteSha,
+      dirty: false,
+      pendingDelete: false,
+    });
+    written += 1;
+  }
+  return written;
+}

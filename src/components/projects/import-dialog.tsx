@@ -107,6 +107,7 @@ export function ImportDialog({
   const [branches, setBranches] = useState<Array<{ name: string; sha: string | null }>>([]);
   const [branch, setBranch] = useState<string>("");
   const [importing, setImporting] = useState<string | null>(null);
+  const cancelRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
@@ -200,28 +201,69 @@ export function ImportDialog({
     }
   };
 
+  /**
+   * GitHub import, driven in batches.
+   *
+   * The server prepares the job (one tree read) and returns immediately; each
+   * `batch` call stores the next few files. Nothing here downloads repository
+   * content into the browser, and closing the tab only pauses the import — the
+   * job resumes from its cursor when the same repository is imported again.
+   */
   const startImport = async (repo: RepoOption, targetBranch?: string) => {
     setImporting(repo.fullName);
     setJob(null);
     setSummary(null);
+    setRepoError(null);
+    cancelRef.current = false;
     try {
-      const { jobId } = await apiPost<{ jobId: string }>("/api/projects/import/job", {
-        source: "github",
-        message: `Preparing ${repo.fullName}`,
-      });
-      pollJob(jobId);
-      const result = await apiPost<{ summary: Summary; note: string }>("/api/projects/import/github", {
-        owner: repo.owner,
-        repo: repo.name,
-        branch: targetBranch || undefined,
-        jobId,
-      });
-      stopPolling();
-      setSummary(result.summary);
-      push(`${repo.fullName} imported — ${result.summary.files} files`, "ok");
-      onImported?.();
+      const started = await apiPost<{ jobId: string; job: ImportJob; reused: boolean; totalFiles: number }>(
+        "/api/projects/import/github",
+        { owner: repo.owner, repo: repo.name, branch: targetBranch || undefined },
+      );
+
+      let current = started.job;
+      setJob(current);
+
+      let guard = 0;
+      while (current.status === "running" && !cancelRef.current && guard < 4000) {
+        guard += 1;
+        try {
+          const step = await apiPost<{ job: ImportJob; done: boolean }>("/api/projects/import/batch", {
+            jobId: started.jobId,
+          });
+          current = step.job;
+          setJob(step.job);
+          if (step.done) break;
+        } catch (error) {
+          // Keep whatever was stored and surface the real error.
+          setRepoError(errorMessage(error));
+          break;
+        }
+        // Yield between batches so the progress bar paints and the phone stays
+        // responsive during a large import.
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+
+      if (cancelRef.current) {
+        await apiPost("/api/projects/import/batch", { jobId: started.jobId, action: "cancel" }).catch(() => undefined);
+        setRepoError("Import cancelled. Files already stored remain available.");
+        return;
+      }
+
+      if (current.status === "succeeded") {
+        setSummary({
+          files: current.fetchedFiles,
+          textFiles: current.fetchedFiles,
+          skipped: current.skippedFiles,
+          bytes: current.totalBytes,
+          branch: targetBranch || undefined,
+        });
+        push(`${repo.fullName} imported — ${current.fetchedFiles} files`, "ok");
+        onImported?.();
+      } else if (current.status === "failed") {
+        setRepoError(current.error ?? "Import failed.");
+      }
     } catch (error) {
-      stopPolling();
       setRepoError(errorMessage(error));
       push(errorMessage(error), "error");
     } finally {
@@ -556,9 +598,22 @@ export function ImportDialog({
                   <Spinner className="h-3 w-3" />
                   {job?.message ?? `Connecting to ${importing}…`}
                 </span>
-                {job && job.totalFiles > 0 && (
-                  <span className="mono">{Math.round((job.fetchedFiles / job.totalFiles) * 100)}%</span>
-                )}
+                <span className="flex items-center gap-2">
+                  {job && job.totalFiles > 0 && (
+                    <span className="mono">{Math.round((job.fetchedFiles / job.totalFiles) * 100)}%</span>
+                  )}
+                  {importing ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        cancelRef.current = true;
+                      }}
+                      className="rounded border border-ink-600/70 px-2 py-0.5 text-[10px] text-slate-300 hover:border-rose-500/50"
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </span>
               </div>
               {job && job.totalFiles > 0 && (
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-700">

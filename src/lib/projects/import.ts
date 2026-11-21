@@ -25,6 +25,8 @@ export const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_PROJECT_FILES = 4000;
 export const MAX_EXTRACTED_BYTES = 128 * 1024 * 1024;
 export const MAX_GITHUB_FILES = 2000;
+/** Files written per batched import request; keeps one request short and resumable. */
+export const IMPORT_BATCH_SIZE = 20;
 
 const SKIP_SEGMENTS = new Set([
   'node_modules',
@@ -96,7 +98,7 @@ export function stripCommonRoot(paths: string[]): { root: string | null; strip: 
   return { root: first, strip: every };
 }
 
-function prepareFile(path: string, data: Buffer, remoteSha: string | null = null): PreparedFile | null {
+export function prepareFile(path: string, data: Buffer, remoteSha: string | null = null): PreparedFile | null {
   if (isSkippedPath(path)) return null;
   if (isSecretPath(path)) return null;
 

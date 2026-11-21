@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { PwaProvider } from "@/components/pwa";
 import { ChristmasProvider } from "@/components/christmas/provider";
+import { CrashSentinel } from "@/components/crash-sentinel";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -37,7 +38,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className="dark">
       <body className="min-h-dvh antialiased">
         <ChristmasProvider>
-          <PwaProvider>{children}</PwaProvider>
+          <PwaProvider>
+            {/* Records a heartbeat while the console is alive, so a renderer that
+                is killed without unloading is reported on the next launch with
+                the last known heap, page and session age. */}
+            <CrashSentinel />
+            {children}
+          </PwaProvider>
         </ChristmasProvider>
       </body>
     </html>

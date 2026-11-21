@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ok, rateLimit, route } from '@/lib/api';
 import { getConnectionView } from '@/lib/github/credentials';
 import { importFromGitHub } from '@/lib/projects/import';
+import { runImportBatch, startGitHubImport } from '@/lib/projects/import-batch';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -15,9 +16,16 @@ const schema = z.object({
 });
 
 /**
- * Imports a repository through the GitHub API — the operator never downloads a
- * ZIP. When the request omits owner/repo, the repository configured in Admin
- * Settings is used (scenario A).
+ * Starts importing a repository through the GitHub API.
+ *
+ * Two modes:
+ *  - **batched (default)**: reads the tree and returns a job id immediately. The
+ *    client then drives `/api/projects/import/batch` until the job completes.
+ *    This is what the File Manager uses, because a single request that downloads
+ *    and stores thousands of files is exactly what a serverless execution limit
+ *    cuts off — the "wait for the repository" symptom.
+ *  - **legacy (`jobId` supplied)**: the pre-existing synchronous path, kept for
+ *    callers that already created a job.
  */
 export const POST = route({ permission: 'file.write' }, async ({ user, body }) => {
   rateLimit(`project-import-github:${user.id}`, 20, 60_000);
@@ -38,17 +46,38 @@ export const POST = route({ permission: 'file.write' }, async ({ user, body }) =
     throw error;
   }
 
-  const result = await importFromGitHub({
+  if (input.jobId) {
+    const result = await importFromGitHub({
+      owner,
+      repoName,
+      branch: input.branch ?? view.repository?.branch ?? null,
+      userId: user.id,
+      jobId: input.jobId,
+    });
+
+    return ok({
+      project: result.project,
+      summary: result.summary,
+      note: `Imported ${result.summary.files} files from ${owner}/${repoName}@${result.summary.branch ?? ''}.`,
+    });
+  }
+
+  const started = await startGitHubImport({
     owner,
     repoName,
     branch: input.branch ?? view.repository?.branch ?? null,
     userId: user.id,
-    jobId: input.jobId,
   });
 
+  // Run the first batch inside this request so small repositories finish without
+  // a second round trip, and large ones return a job the client can resume.
+  const job = started.reused ? started.job : await runImportBatch(started.job.id);
+
   return ok({
-    project: result.project,
-    summary: result.summary,
-    note: `Imported ${result.summary.files} files from ${owner}/${repoName}@${result.summary.branch ?? ''}.`,
+    jobId: job.id,
+    job,
+    totalFiles: job.totalFiles,
+    reused: started.reused,
+    note: `Prepared ${job.totalFiles} files from ${owner}/${repoName}.`,
   });
 });
