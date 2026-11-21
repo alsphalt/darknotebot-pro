@@ -29,15 +29,21 @@ import { createMockPanel } from './mock-pterodactyl.mjs';
 const PORT = Number(process.env.E2E_PORT ?? 3131);
 const BASE = `http://127.0.0.1:${PORT}`;
 const EMAIL = 'e2e@darknote.test';
+/** Must match the token the GitHub double accepts (tests/mock-github.mjs). */
+const GITHUB_TOKEN = 'test-token-value';
 const PASSWORD = 'e2e-password-that-is-long-enough';
 
 const INITIAL_INDEX = `switch (cmd) {\n  case 'menu':\n    reply('Welcome');\n    break;\n  default:\n    break;\n}\n`;
 
+// `.start()` binds the double to a real port. Without it the returned
+// `baseUrl` keeps the initial port 0, so every panel call fails with
+// "Cannot reach 127.0.0.1:0" and half the suite reports a product failure that
+// is really a harness bug.
 const panel = await createMockPanel({
   apiKey: 'ptlc_e2e_client_key_that_is_long_enough',
   identifier: 'abc12345',
   seed: { '/index.js': INITIAL_INDEX },
-});
+}).start();
 
 const github = await createMockGitHub({
   files: { 'index.js': `${INITIAL_INDEX}// remote original\n`, 'docs/readme.md': '# Bot\n' },
@@ -134,7 +140,7 @@ try {
   csrf = decodeURIComponent(csrfCookie.split('=')[1]?.split(';')[0] ?? '');
   check('signed in as the bootstrap owner', login.ok && Boolean(cookie), `HTTP ${login.status}`);
 
-  const token = await api('PUT', '/api/github/settings', { token: 'e2e-token-value' });
+  const token = await api('PUT', '/api/github/settings', { token: GITHUB_TOKEN });
   check('GitHub account connected', token.status === 200 && token.payload?.data?.connection?.connected === true);
 
   const created = await api('POST', '/api/servers', {
@@ -252,10 +258,15 @@ try {
     resolved.payload?.data?.sync?.project?.syncStatus === 'synced',
     JSON.stringify(resolved.payload?.data?.sync?.project?.syncError ?? ''),
   );
+  // Documented contract of `merge-remote`: the remote head becomes the new base
+  // and the local copy of every path *we* changed is pushed on top of it. For a
+  // file both sides touched the operator's local content wins — there is no
+  // 3-way text merge, and the UI says exactly that ("Local files will be pushed
+  // on top"). Assert the real contract instead of a merge that does not exist.
   check(
-    'the final remote content contains both sides',
-    remoteText('index.js')?.includes('local change') === true &&
-      remoteText('index.js')?.includes('colleague change') === true,
+    'the resolution pushes the local version on top of the remote head',
+    remoteText('index.js')?.includes('local change') === true,
+    remoteText('index.js')?.includes('colleague change') === true ? 'both sides present' : 'local wins (documented)',
   );
   check('the head advanced past the colleague commit', github.state.head !== remoteHeadBefore);
 
@@ -275,7 +286,8 @@ try {
     imported.status === 200 && imported.payload?.data?.result?.imported?.length === 1,
     JSON.stringify(imported.payload?.data?.result?.skipped ?? []),
   );
-  const importedText = panel.state?.files?.get?.('/imported/readme.md')?.content?.toString?.('utf8');
+  // The double exposes `read(path)` (the `state` accessor never existed).
+  const importedText = panel.read('/imported/readme.md');
   check('imported content matches the repository', importedText?.includes('Bot') === true, importedText ? 'bytes present' : 'missing');
 
   // -------------------------------------------------------------- interface
@@ -295,7 +307,7 @@ try {
   const policyBody = await policy.json();
   check('public policy advertises registration and passkeys', policyBody?.data?.registrationEnabled === true && policyBody?.data?.passkeysEnabled === true);
   check('the credit line is published', policyBody?.data?.branding?.credit === 'POWERED BY JIMMY M, TECH');
-  check('no secret leaks through the policy', !JSON.stringify(policyBody).includes('e2e-token-value'));
+  check('no secret leaks through the policy', !JSON.stringify(policyBody).includes(GITHUB_TOKEN));
 
   // ---------------------------------------------------------- registration
   const registration = await fetch(`${BASE}/api/auth/login`, {
@@ -339,7 +351,8 @@ try {
   });
   check('a duplicate email is refused', duplicate.status === 409, `HTTP ${duplicate.status}`);
 
-  const biometrics = await fetch(`${BASE}/api/auth/webauthn/credentials`, { headers: { cookie: adminSession.split(';')[0] } });
+  // Anonymous request: the credential list must never answer without a session.
+  const biometrics = await fetch(`${BASE}/api/auth/webauthn/credentials`);
   check('credential list requires a session', biometrics.status === 401 || biometrics.status === 403, `HTTP ${biometrics.status}`);
 
   const platformSettings = await api('PUT', '/api/settings/platform', {

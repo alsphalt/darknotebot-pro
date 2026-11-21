@@ -35,6 +35,16 @@ import {
  * only pauses the import instead of losing it.
  */
 
+/**
+ * A `running` job older than this is treated as abandoned.
+ *
+ * A job only advances while a browser tab drives its batches, so a closed tab
+ * leaves the row `running` with nothing to move it. Fifteen minutes is far
+ * beyond a healthy import (2000 files at 20 per request) and short enough that
+ * an operator retrying does not wait on a corpse.
+ */
+const IMPORT_JOB_STALE_MS = 15 * 60_000;
+
 export interface ImportPlan {
   owner: string;
   repo: string;
@@ -83,15 +93,35 @@ export async function startGitHubImport(options: {
 
   // A running import of the same repository is reused instead of queued twice:
   // double-clicking "Import" must not start two writers on one project.
-  const running = await queryOne<{ id: string }>(
-    `select id from project_import_jobs
+  const running = await queryOne<{ id: string; started_at: string | Date }>(
+    `select id, started_at from project_import_jobs
       where status = 'running' and source = 'github'
         and detail->>'owner' = $1 and detail->>'repo' = $2 and detail->>'branch' = $3
+      order by started_at desc
       limit 1`,
     [owner, repoName, branch],
   );
   if (running) {
-    return { job: await getImportJob(running.id), reused: true };
+    const ageMs = Date.now() - new Date(running.started_at).getTime();
+    /**
+     * Reuse only a job that can still be advanced.
+     *
+     * A job is advanced by whichever tab is driving it. If that tab was closed
+     * (or the phone killed it), the row stays `running` forever and every later
+     * import of the same repository returns it — the dialog then polls a job
+     * nothing is moving, which is exactly what "the import is stuck" looked
+     * like on the phone. Past the stale window the old job is failed
+     * explicitly, so the operator sees a new attempt start instead of a hang.
+     */
+    if (ageMs < IMPORT_JOB_STALE_MS) {
+      return { job: await getImportJob(running.id), reused: true };
+    }
+    await updateImportJob(running.id, {
+      status: 'failed',
+      phase: 'abandoned',
+      error: 'The previous import stopped advancing and was abandoned.',
+      message: 'Abandoned a stalled import; a new one was started.',
+    });
   }
 
   const tree = await client.getTree(owner, repoName, commit.tree.sha);
@@ -210,7 +240,20 @@ export async function runImportBatch(jobId: string): Promise<ImportJobRecord> {
   const detail = job0.detail;
   const { plan, cursor } = detail;
   if (!plan?.length) {
+    /**
+     * Zero importable files (every path excluded, secret-shaped or binary).
+     * Finish the job *and* release the project: leaving it on `importing`
+     * meant the project card never left its spinner and the next import of the
+     * same repository looked like it had never finished.
+     */
     await updateImportJob(jobId, { status: 'succeeded', phase: 'done', message: 'Nothing to import.' });
+    if (job0.projectId) {
+      await repo.updateProject(job0.projectId, {
+        status: 'import_failed',
+        statusMessage:
+          'Nothing in that repository could be imported — every file is binary, excluded or credential-shaped.',
+      });
+    }
     return getImportJob(jobId);
   }
 

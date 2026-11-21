@@ -115,3 +115,58 @@ test('a cancelled import keeps the files already written', async () => {
   const again = await runImportBatch(job.id);
   assert.equal(again.fetchedFiles, IMPORT_BATCH_SIZE);
 });
+
+/**
+ * A job only advances while a tab is driving its batches. If that tab goes away
+ * the row stays `running`, and the old lookup returned it forever, so looking
+ * like "the import is stuck" was the only possible outcome of retrying.
+ */
+test('a stalled import is abandoned instead of blocking every later attempt', async () => {
+  const { query, queryOne } = await import('../src/lib/db.ts');
+
+  const { job } = await startGitHubImport({ owner: github.state.owner, repoName: github.state.repo });
+  assert.equal(job.status, 'running');
+
+  // Age the row past the stale window without changing anything else.
+  await query(`update project_import_jobs set started_at = now() - interval '20 minutes' where id = $1`, [job.id]);
+
+  const retried = await startGitHubImport({ owner: github.state.owner, repoName: github.state.repo });
+  assert.equal(retried.reused, false, 'a 20-minute-old running job must not be reused');
+  assert.notEqual(retried.job.id, job.id, 'the retry starts a new job');
+
+  const old = await queryOne<{ status: string; phase: string | null }>(
+    `select status, phase from project_import_jobs where id = $1`,
+    [job.id],
+  );
+  assert.equal(old?.status, 'failed');
+  assert.equal(old?.phase, 'abandoned');
+
+  await cancelImport(retried.job.id);
+});
+
+/** A repository with nothing importable must release the project, not pin it. */
+test('an import with no eligible files finishes the project instead of leaving it importing', async () => {
+  const { createMockGitHub } = await import('./mock-github.mjs');
+  const empty = await createMockGitHub({
+    repo: 'empty-bot',
+    // `.env` is credential-shaped and the image is binary: neither is importable.
+    files: { '.env': 'SECRET=1\n', 'logo.png': 'not-really-a-png\n' },
+  });
+  const previousBase = process.env.DARKNOTE_GITHUB_API_BASE;
+  process.env.DARKNOTE_GITHUB_API_BASE = empty.url;
+  try {
+    const { job } = await startGitHubImport({ owner: empty.state.owner, repoName: empty.state.repo });
+    assert.equal(job.totalFiles, 0);
+
+    const finished = await runImportBatch(job.id);
+    assert.equal(finished.status, 'succeeded');
+
+    const project = await getProject(job.projectId!);
+    assert.notEqual(project?.status, 'importing', 'the project must not stay on "importing"');
+    assert.equal(project?.status, 'import_failed');
+  } finally {
+    if (previousBase === undefined) delete process.env.DARKNOTE_GITHUB_API_BASE;
+    else process.env.DARKNOTE_GITHUB_API_BASE = previousBase;
+    await empty.close();
+  }
+});

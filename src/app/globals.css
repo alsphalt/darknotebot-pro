@@ -455,6 +455,44 @@ input[type="checkbox"] {
   }
 }
 
+/**
+ * Phones: the same scene at a fraction of the compositing cost.
+ *
+ * The desktop scene is six full-width text layers — two each at blur 0, 7px and
+ * 18px — plus a 130vw × 46vh glow at blur 28px, a spinning conic gradient and a
+ * `mix-blend-mode: soft-light` grain, every one of them promoted with
+ * `will-change` and animating forever. Each blurred layer needs its own
+ * viewport-sized GPU texture, and a low-end Android device (the reported Galaxy
+ * A17 class) has very little GPU memory to give: when the compositor cannot
+ * allocate, the renderer process is killed and Chrome shows the "Aw, Snap!"
+ * page. Nothing here is worth that.
+ *
+ * On a narrow viewport the third depth layer, the grain (its own compositing
+ * pass), the spin and two of the blur radii are dropped. The word still travels
+ * and still collides — the scene reads the same on a 6" screen.
+ */
+@media (max-width: 640px) {
+  .bb-depth-3 {
+    display: none;
+  }
+  .bb-depth-2 {
+    filter: blur(3px);
+  }
+  .bb-collision {
+    filter: blur(12px);
+  }
+  .bb-stage::after {
+    animation: none;
+    will-change: auto;
+  }
+  .bb-grain {
+    display: none;
+  }
+  .bb-word-layer {
+    will-change: auto;
+  }
+}
+
 /* Message typography inside BIGBROTHER conversations. */
 .bb-prose {
   font-size: 13.5px;

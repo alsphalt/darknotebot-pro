@@ -143,11 +143,41 @@ export function GitHubSyncBar({
 
   // Poll while something is queued, slowly otherwise: the pending state is the
   // only one that changes without a user action.
+  //
+  // The timer stops while the tab is hidden and one read runs on return. A
+  // background tab on Android still gets its timers, so a dashboard left open
+  // used to keep a request every 4 s alive for as long as the phone stayed
+  // awake — the same reason `useApi` drops its interval on `hidden`.
   useEffect(() => {
     if (!serverId) return;
     const active = view?.project?.syncStatus === "pending" || view?.project?.syncStatus === "syncing";
-    const timer = setInterval(() => void load(active), active ? 4000 : 25000);
-    return () => clearInterval(timer);
+    const every = active ? 4000 : 25000;
+
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (timer) return;
+      timer = setInterval(() => void load(active), every);
+    };
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    const onVisibility = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) {
+        stop();
+        return;
+      }
+      start();
+      void load(active);
+    };
+
+    if (typeof document === "undefined" || !document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load, serverId, view?.project?.syncStatus]);
 
   const fileSelection = useMemo(
