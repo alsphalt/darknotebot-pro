@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 import { currentUser } from "@/lib/auth/session";
 import { AppShell } from "@/components/app-shell";
-import { CrashSentinel } from "@/components/crash-sentinel";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerProvider, ToastProvider } from "@/components/providers";
 
@@ -10,9 +9,12 @@ export const dynamic = "force-dynamic";
 /**
  * Authenticated shell.
  *
- * `CrashSentinel` is mounted here rather than in the root layout so it only runs
- * for signed-in sessions (it reports to an authenticated endpoint) and never
- * competes with the login page for the first paint. It renders nothing.
+ * `CrashSentinel` is mounted once, in the root layout. Mounting it here as well
+ * started a second sentinel per navigation, and each start wrote its own session
+ * record over the first one's — so the following mount read a live session as
+ * "terminated without unloading" and filed a false crash report on every page
+ * load, which is exactly the evidence an "Aw, Snap!" investigation needs to be
+ * clean.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await currentUser();
@@ -26,7 +28,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               the console chrome down with it. */}
           <ErrorBoundary scope="This page">{children}</ErrorBoundary>
         </AppShell>
-        <CrashSentinel />
       </ServerProvider>
     </ToastProvider>
   );

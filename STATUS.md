@@ -1,6 +1,47 @@
 # Darknote Control Center — build status
 
-Last updated: 2026-11-20 · branch `main`
+Last updated: 2026-11-21 · branch `main`
+
+## This pass — `db/schema.sql` resolution, build packaging, one honest correction
+
+`db/schema.sql` was already in the repository, at the exact path the code reads
+(`db/schema.sql`, next to `package.json`, committed). What could fail was **finding** it and
+**shipping** it.
+
+- **Finding it.** `readSql()` tried `process.cwd()` and `process.cwd()/..` only. That is right for
+  `npm run dev` from the project and wrong for everything else: systemd/pm2/Pterodactyl units, a
+  `next start` launched from another directory, a bundled `.next` output. `src/lib/db/migrate.ts` now
+  resolves the root from `DARKNOTE_DB_DIR`, then the cwd and its ancestors, then the entry script and
+  the bundled module directory and their ancestors (8 levels, stopping at `/`). A candidate counts
+  only if `db/schema.sql` exists and contains a `create table`; the failure message lists every path
+  tried and names the override instead of saying "not found".
+- **Shipping it.** No module imports the SQL, so the bundler never traced it and a serverless or
+  standalone build could ship without the folder. `next.config.ts` now sets
+  `outputFileTracingIncludes` for `db/schema.sql` and `db/migrations/**/*.sql`. Verified in the build
+  output: every route trace (`.next/server/app/**/*.nft.json`) lists all four SQL files.
+- **Not `vercel.json`.** `{"functions": {"api/*.js": {"includeFiles": "db/**"}}}` applies to Pages
+  Router files under `api/`. This project has none — it is App Router route handlers — so that
+  snippet would have been inert. The tracing include is the mechanism that actually works on Vercel.
+- **Sentinel false positives.** `CrashSentinel` was mounted in both the root layout and the app
+  layout, so every authenticated navigation started a second sentinel; each start read the first
+  one's live heartbeat as "terminated without unloading" and filed a false
+  `browser_terminated_session`. It is now mounted once, and a heartbeat under 60 s old is treated as a
+  live page (second tab, fast reload) instead of a crash.
+
+**"Aw, Snap!" is not a server error.** Chrome shows it when the renderer process dies (memory/GPU);
+a 500 from the server renders the Next.js error page in a working tab. The database path fix removes
+the "schema not found" failure, but it cannot explain or cure a renderer kill, and this pass does not
+claim otherwise. The sentinel is what will identify it, now that its evidence is not polluted.
+
+**Verified:** `tsc --noEmit` clean; `npm test` **168 tests, 160 pass, 0 fail, 8 pre-existing skips**
+(8 new: root resolution, override, rejection of a non-schema file, subdirectory start, actionable
+error, tracked-file check, live-heartbeat guard); `npm run build` succeeds and the trace lists the
+SQL files. Runtime check with the process started from `/tmp`, i.e. outside the checkout:
+`scripts/db-check.ts` created all 54 tables from `schema.sql` + 4 migrations, and a production
+`next start` returned `200` for `/login` and `/api/health` with `migrations.pending: []`.
+
+**Not verified:** a serverless deployment (no Vercel/Neon credentials here) and a physical Android
+device.
 
 ## Production incident — "a server-side exception has occurred" (fixed)
 

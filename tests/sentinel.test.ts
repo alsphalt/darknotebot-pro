@@ -137,7 +137,8 @@ test('an unclosed heartbeat from a previous session is reported once', async () 
   const previous = {
     id: 'previous',
     startedAt,
-    lastBeatAt: startedAt + 600_000,
+    // Six minutes before "now": clearly not a heartbeat from a live tab.
+    lastBeatAt: startedAt + 300_000,
     page: '/console',
     heapBytes: 412 * 1024 * 1024,
     heapLimit: 512 * 1024 * 1024,
@@ -165,6 +166,37 @@ test('an unclosed heartbeat from a previous session is reported once', async () 
     const stale = JSON.parse(second.storage.getItem(STORAGE_KEY) ?? '{}');
     handle.stop();
     assert.equal(stale.endedCleanly, false, 'the previous record was already marked reported');
+  } finally {
+    clearFakeBrowser();
+  }
+});
+
+test('a heartbeat from a live page (second tab, second mount) is not a crash', async () => {
+  const now = Date.now();
+  const browser = installFakeBrowser({
+    [STORAGE_KEY]: JSON.stringify({
+      id: 'other-tab',
+      startedAt: now - 120_000,
+      lastBeatAt: now - 5_000,
+      page: '/console',
+      heapBytes: 80 * 1024 * 1024,
+      heapLimit: 512 * 1024 * 1024,
+      longTasks: 1,
+      longTaskMs: 60,
+      navigationType: 'navigate',
+      endedCleanly: false,
+      endedAt: null,
+    }),
+  });
+  try {
+    const { startSentinel } = await import('../src/lib/perf/sentinel.ts');
+    const handle = startSentinel();
+    assert.equal(
+      browser.reports.length,
+      0,
+      'a heartbeat five seconds old belongs to a page that is still alive — reporting it was a false crash on every navigation',
+    );
+    handle.stop();
   } finally {
     clearFakeBrowser();
   }

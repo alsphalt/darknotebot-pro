@@ -353,6 +353,28 @@ DARKNOTE_DB_POOL=1            # optional; 1 on serverless, 8 for a long-running 
   it is `create … if not exists` end to end, so a cosmetic edit is re-applied once instead of blocking
   a deploy.
 
+#### Where `db/schema.sql` is found
+
+The baseline is read with `fs` at the first database call, so `src/lib/db/migrate.ts` resolves the
+project root instead of trusting the working directory:
+
+1. `DARKNOTE_DB_DIR` — the project root, or `db/` itself. The documented escape hatch for an unusual
+   host layout.
+2. `process.cwd()` and its ancestors (up to 8) — `npm run dev`, `npm start`.
+3. The entry script and the bundled module directory, and their ancestors — a process started by
+   systemd, pm2 or Pterodactyl, and a `.next` bundle whose cwd is elsewhere.
+
+A candidate is accepted only when `<root>/db/schema.sql` exists **and** contains a `create table`
+statement, so an unrelated `db/` higher in the tree cannot be picked up. When nothing matches, the
+error lists every path that was tried and names `DARKNOTE_DB_DIR`; it never reports a bare
+"not found" for a file that is committed.
+
+`db/` is not imported by any module, so the bundler cannot see it on its own.
+`outputFileTracingIncludes` in `next.config.ts` traces `db/schema.sql` and `db/migrations/*.sql` into
+every route, which is what carries the folder into a Vercel function or a standalone build. The
+`{"functions": {"api/*.js": {"includeFiles": "db/**"}}}` form of `vercel.json` only applies to the
+Pages Router `api/` directory; this app has no such files, so that setting would do nothing here.
+
 ### Vercel
 
 1. `DATABASE_URL` (pooled) + `DARKNOTE_SECRET` in *Project → Settings → Environment Variables*
@@ -393,6 +415,13 @@ repository) — one account can never read another account's project, conversati
 exception to log, so the fix has two halves: stop the app spending memory it does not need, and make the
 next death measurable.
 
+It is **not** what a server-side error looks like. A 500 from `/` (a missing `db/schema.sql`, a failed
+migration) renders the Next.js error page — "Application error: a server-side exception has occurred" —
+inside a working browser tab. Chrome only shows `Aw, Snap!` when its renderer process died, so the two
+symptoms have different causes and the database path fix above does not, by itself, explain a renderer
+crash. If the panel still shows `Aw, Snap!`, the Error Center now holds the heap and page from the
+session that died.
+
 ### What the client does now
 
 | Area | Change |
@@ -421,6 +450,11 @@ Two pressure signals are reported the same way while the app is still alive:
 So the next report is not "it crashed again" but, for example, "died on `/console` after 11 minutes with
 a 412 MB heap and 63 long tasks". The sentinel never blocks rendering, never runs while hidden, and
 swallows its own failures.
+
+It is mounted exactly once, in the root layout, and a heartbeat younger than 60 s is treated as a page
+that is still alive (a second tab, a fast reload) rather than a crash. Both rules matter: a second
+mount used to overwrite the first one's record, so every navigation could file a false
+`browser_terminated_session` and poison the evidence it was built to collect.
 
 **Not verified here:** a physical Android device, an installed PWA on Android, and Android WebView. The
 changes above are reasoned from the code and measured on the server side (payload sizes, row counts,

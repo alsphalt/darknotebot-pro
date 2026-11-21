@@ -16,6 +16,20 @@ const nextConfig: NextConfig = {
   // This repository can live inside another project that has its own lockfile.
   // Pin the tracing root so Next writes and reads the same .next directory.
   outputFileTracingRoot: __dirname,
+  /**
+   * `db/schema.sql` and `db/migrations/*.sql` are read with fs at boot, not
+   * imported, so the bundler cannot discover them on its own. Without this a
+   * serverless deployment or `output: "standalone"` build ships without the
+   * folder and the first database call fails with "db/schema.sql not found".
+   *
+   * This is the App Router equivalent of the Vercel `functions.includeFiles`
+   * setting — that one only applies to files under `api/`, which this app does
+   * not use.
+   */
+  outputFileTracingIncludes: {
+    "/**": ["./db/schema.sql", "./db/migrations/**/*.sql"],
+    "/*": ["./db/schema.sql", "./db/migrations/**/*.sql"],
+  },
   poweredByHeader: false,
   serverExternalPackages: [
     "ws",

@@ -24,6 +24,13 @@ const HEARTBEAT_MS = 20_000;
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * A heartbeat younger than this belongs to a page that is still alive — a second
+ * tab, a second mount, a fast reload — not to a renderer that was killed. Without
+ * the guard, any of those was reported as a crash.
+ */
+const LIVE_GRACE_MS = HEARTBEAT_MS * 3;
+
+/**
  * Heap thresholds. A phone renderer is typically killed somewhere between
  * 300–500 MB of JavaScript heap; `performance.memory.jsHeapSizeLimit` reports
  * the real ceiling where available. These are pressure warnings, not crash
@@ -162,6 +169,8 @@ export function startSentinel(options: SentinelOptions = {}): SentinelHandle {
   try {
     const previous = read();
     const now = Date.now();
+    const previousWasLive =
+      previous ? now - previous.lastBeatAt < LIVE_GRACE_MS : false;
     const session: SessionRecord = {
       id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       startedAt: now,
@@ -181,7 +190,7 @@ export function startSentinel(options: SentinelOptions = {}): SentinelHandle {
      * killed. `STALE_AFTER_MS` keeps an old record from an abandoned tab from
      * being reported as today's crash.
      */
-    if (previous && !previous.endedCleanly && now - previous.lastBeatAt < STALE_AFTER_MS) {
+    if (previous && !previous.endedCleanly && !previousWasLive && now - previous.lastBeatAt < STALE_AFTER_MS) {
       const livedSeconds = Math.round((previous.lastBeatAt - previous.startedAt) / 1000);
       report(
         `The browser terminated the previous session without unloading it (page ${previous.page}, heap ${formatMb(previous.heapBytes)} of ${formatMb(previous.heapLimit)}, ${livedSeconds}s alive, ${previous.longTasks} long tasks).`,

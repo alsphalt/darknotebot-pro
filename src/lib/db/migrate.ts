@@ -57,19 +57,148 @@ const LEGACY_COLUMNS: ReadonlyArray<readonly [table: string, column: string, def
   ['editor_drafts', 'chunk_count', 'integer'],
 ];
 
-function readSql(relative: string): string {
-  const candidates = [
-    path.join(process.cwd(), relative),
-    path.join(process.cwd(), '..', relative),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8');
+/** Folder holding `schema.sql` and `migrations/`, relative to the project root. */
+const SQL_DIR = 'db';
+
+/** How far up the tree to look for the project root before giving up. */
+const MAX_ANCESTORS = 8;
+
+declare const __dirname: string | undefined;
+
+function ancestors(start: string): string[] {
+  const out: string[] = [];
+  let dir = path.resolve(start);
+  for (let depth = 0; depth <= MAX_ANCESTORS; depth += 1) {
+    out.push(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached the filesystem root
+    dir = parent;
   }
-  throw new Error(`${relative} not found — cannot initialise the database`);
+  return out;
+}
+
+/** Directory of the script that was started (`next start`, `npm run db:migrate`). */
+function entryDir(): string | null {
+  const entry = process.argv[1];
+  return typeof entry === 'string' && entry.length > 0 ? path.dirname(path.resolve(entry)) : null;
+}
+
+/** Directory of this module as emitted by the bundler, when the runtime has one. */
+function moduleDir(): string | null {
+  try {
+    return typeof __dirname === 'string' && __dirname.length > 0 ? __dirname : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every directory that could be the project root, most explicit first.
+ *
+ * `process.cwd()` alone is not enough. A process started by systemd, pm2 or
+ * Pterodactyl, a `next start` launched from a parent folder, and a Next
+ * standalone/serverless bundle all have a working directory that has nothing to
+ * do with where the project was built. The old lookup only tried `cwd` and its
+ * parent, so the first database call failed with "db/schema.sql not found" even
+ * though the file was committed.
+ */
+export function dbRootCandidates(): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string | null | undefined) => {
+    if (!dir) return;
+    const resolved = path.resolve(dir);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    roots.push(resolved);
+  };
+
+  // 1. Explicit override, so a host with an unusual layout has a documented way
+  //    out. Accepts the project root or the `db` folder itself.
+  const override = process.env.DARKNOTE_DB_DIR?.trim();
+  if (override) {
+    add(override);
+    add(path.dirname(path.resolve(override)));
+  }
+
+  // 2. The working directory and its ancestors (`npm run`, `next dev`).
+  for (const dir of ancestors(process.cwd())) add(dir);
+
+  // 3. The entry script and this module, then their ancestors. Covers a server
+  //    started from another directory and a bundled `.next` output.
+  for (const start of [entryDir(), moduleDir()]) {
+    if (!start) continue;
+    for (const dir of ancestors(start)) add(dir);
+  }
+
+  return roots;
+}
+
+/** A `db/schema.sql` that is not the project's baseline (an empty file, a note) is rejected. */
+function looksLikeBaseline(file: string): boolean {
+  try {
+    return /create\s+table/i.test(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The project root that owns `db/schema.sql`, or `null` when no candidate has
+ * one. Exported for the test that proves the cwd-independent lookup.
+ */
+export function findDbRoot(roots: string[] = dbRootCandidates()): string | null {
+  for (const root of roots) {
+    if (looksLikeBaseline(path.join(root, SQL_DIR, 'schema.sql'))) return root;
+    // DARKNOTE_DB_DIR may point straight at db/.
+    if (path.basename(root) === SQL_DIR && looksLikeBaseline(path.join(root, 'schema.sql'))) {
+      return path.dirname(root);
+    }
+  }
+  return null;
+}
+
+let cachedRoot: string | null = null;
+
+/** Slate the memoised root; only tests and scripts that chdir need this. */
+export function resetDbRootCache(): void {
+  cachedRoot = null;
+}
+
+/**
+ * Project root, resolved once. Throws an operator-facing error that lists every
+ * path that was tried — a bare "not found" is what made this hard to diagnose.
+ */
+export function dbRoot(): string {
+  if (cachedRoot) return cachedRoot;
+  const root = findDbRoot();
+  if (!root) {
+    const tried = dbRootCandidates().map((candidate) => path.join(candidate, SQL_DIR, 'schema.sql'));
+    throw new Error(
+      [
+        'Cannot initialise the database: db/schema.sql was not found.',
+        'Looked for:',
+        ...tried.map((candidate) => `  ${candidate}`),
+        'The file must sit next to package.json. If your host ships only the built output,',
+        'make sure db/ is traced into the bundle (outputFileTracingIncludes in next.config.ts),',
+        'or set DARKNOTE_DB_DIR to the directory that contains db/.',
+      ].join('\n'),
+    );
+  }
+  cachedRoot = root;
+  return root;
+}
+
+function readSql(relative: string): string {
+  const file = path.join(dbRoot(), relative);
+  if (!fs.existsSync(file)) {
+    throw new Error(`${relative} not found at ${file} — cannot initialise the database`);
+  }
+  return fs.readFileSync(file, 'utf8');
 }
 
 export function baselineSql(): string {
-  return readSql(path.join('db', 'schema.sql'));
+  return readSql(path.join(SQL_DIR, 'schema.sql'));
 }
 
 interface MigrationFile {
@@ -92,12 +221,10 @@ export function migrationFiles(): MigrationFile[] {
     { name: BASELINE_NAME, sql: baseline, checksum: checksum(baseline) },
   ];
 
-  const dirCandidates = [
-    path.join(process.cwd(), 'db', 'migrations'),
-    path.join(process.cwd(), '..', 'db', 'migrations'),
-  ];
-  const dir = dirCandidates.find((candidate) => fs.existsSync(candidate));
-  if (!dir) return files;
+  // Same root as the baseline: a migrations folder found through a different
+  // rule than schema.sql is a folder from a different checkout.
+  const dir = path.join(dbRoot(), SQL_DIR, 'migrations');
+  if (!fs.existsSync(dir)) return files;
 
   const extra = fs
     .readdirSync(dir)
