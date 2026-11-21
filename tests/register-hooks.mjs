@@ -9,6 +9,9 @@
  * 2. The application source uses extensionless relative imports (the TypeScript
  *    convention). Node's type stripping needs a real filename, so `.ts` and
  *    `/index.ts` are tried for extensionless relative specifiers.
+ * 3. The `@/` alias (`@/lib/db`) is resolved to `src/`, the same mapping as
+ *    `tsconfig.json`, so a route handler can be imported and called directly in
+ *    a test instead of only through a running server.
  */
 import { register } from 'node:module';
 
@@ -19,9 +22,22 @@ register(
       import { fileURLToPath, pathToFileURL } from 'node:url';
 
       const empty = ${JSON.stringify(new URL('./empty-module.mjs', import.meta.url).href)};
+      const src = ${JSON.stringify(new URL('../src/', import.meta.url).href)};
 
       export async function resolve(specifier, context, next) {
         if (specifier === 'server-only') return { url: empty, shortCircuit: true };
+
+        if (specifier.startsWith('@/')) {
+          const path = fileURLToPath(new URL(specifier.slice(2), src));
+          if (!/\\.[cm]?[jt]sx?$/.test(path) && !path.endsWith('.json')) {
+            for (const candidate of [path + '.ts', path + '.tsx', path + '/index.ts', path + '/index.tsx']) {
+              if (existsSync(candidate)) {
+                return { url: pathToFileURL(candidate).href, shortCircuit: true };
+              }
+            }
+          }
+          if (existsSync(path)) return { url: pathToFileURL(path).href, shortCircuit: true };
+        }
 
         if (specifier.startsWith('.') || specifier.startsWith('/')) {
           const base = context.parentURL
@@ -29,7 +45,7 @@ register(
             : pathToFileURL(specifier);
           const path = fileURLToPath(base);
           if (!/\\.[cm]?[jt]sx?$/.test(path) && !path.endsWith('.json')) {
-            for (const candidate of [path + '.ts', path + '.tsx', path + '/index.ts']) {
+            for (const candidate of [path + '.ts', path + '.tsx', path + '/index.ts', path + '/index.tsx']) {
               if (existsSync(candidate)) {
                 return { url: pathToFileURL(candidate).href, shortCircuit: true };
               }

@@ -26,6 +26,7 @@ type SessionInfo = {
   needsBootstrap: boolean;
   setupTokenConfigured?: boolean;
   env: { ok: boolean; missing: string[]; backupDriver: string };
+  database?: { ok: boolean; error: string | null };
 };
 
 export default function LoginPage() {
@@ -189,10 +190,26 @@ export default function LoginPage() {
               : "No administrator exists yet. Create the owner account using the SETUP_TOKEN from your environment."}
           </p>
 
-          {info?.env && !info.env.ok && (
+          {info?.env && !info.env.ok && info.env.missing.length > 0 && (
             <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
               Server is missing environment variables: <span className="mono">{info.env.missing.join(", ")}</span>.
               Set them before signing in — see SETUP.md.
+            </div>
+          )}
+
+          {/*
+            The database probe always answers now, so a broken deployment explains
+            itself here instead of only in the server log. Sign-in is disabled
+            below while this is shown: posting credentials to a database that
+            cannot start would fail with a 500 and tell the operator nothing.
+          */}
+          {info?.database && !info.database.ok && (
+            <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-200">
+              <span className="font-semibold">The database did not initialise.</span>{" "}
+              <span className="mono break-words">{info.database.error ?? "No further detail was returned."}</span>
+              <div className="mt-1 text-rose-200/70">
+                Nothing was deleted. Fix the connection or migration above, redeploy, then reload this page.
+              </div>
             </div>
           )}
 
@@ -342,7 +359,11 @@ export default function LoginPage() {
           <button
             type="submit"
             className="btn-primary mt-5 w-full"
-            disabled={busy || (mode === "bootstrap" && !isPasswordValid(password))}
+            disabled={
+              busy ||
+              Boolean(info?.database && !info.database.ok) ||
+              (mode === "bootstrap" && !isPasswordValid(password))
+            }
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
             {mode === "login" ? "Sign in" : "Create owner account"}

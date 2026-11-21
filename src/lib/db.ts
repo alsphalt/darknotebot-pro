@@ -53,6 +53,41 @@ function isNeonHost(url: string): boolean {
   }
 }
 
+/**
+ * Can this process fall back to the embedded PGlite database?
+ *
+ * Locally, yes — that is how the app runs without any infrastructure. On a
+ * serverless host (Vercel, Lambda, Netlify) the answer is no unless the operator
+ * asks for it explicitly: the filesystem is read-only apart from an ephemeral
+ * `/tmp`, so a PGlite database there is created empty on one instance, is
+ * invisible to the next one, and is discarded on the next cold start — along
+ * with every administrator account, session and project row written to it.
+ *
+ * It is also the shape of the reported production failure: with no
+ * `DATABASE_URL`, the first query initialises PGlite, and if the baseline is not
+ * in the deployed function bundle (or the platform refused the directory) the
+ * login page reports "db/schema.sql not found — cannot initialise the database".
+ * Either way the SQL file is not the problem — the missing connection string is.
+ * Failing loudly beats silently building a database that cannot survive a
+ * redeploy, and the message names the variable to set.
+ */
+export function pgliteFallbackAllowed(): boolean {
+  if (env.dbDriver === 'pglite') return true;
+  const serverless =
+    process.env.VERCEL === '1' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.NETLIFY);
+  return !(serverless && env.isProd);
+}
+
+export const NO_DATABASE_URL_MESSAGE = [
+  'DATABASE_URL is not configured, and this deployment runs on a serverless host where the embedded',
+  'PGlite database cannot persist: it would be created empty in /tmp and discarded on the next cold',
+  'start, losing every administrator account and session.',
+  'Set DATABASE_URL to the Neon PostgreSQL connection string (Neon → Project → Connection string,',
+  'the "-pooler" host) and redeploy, or set DARKNOTE_DB_DRIVER=pglite deliberately for a throw-away preview.',
+].join(' ');
+
 function sslConfig(): false | { rejectUnauthorized: boolean } {
   if (env.databaseSsl === 'disable') return false;
   return { rejectUnauthorized: env.databaseSsl !== 'no-verify' };
@@ -270,6 +305,10 @@ async function createNeonServerless(): Promise<DbClient> {
 }
 
 async function createPglite(): Promise<DbClient> {
+  // Never build a throw-away database where it cannot survive: see
+  // `pgliteFallbackAllowed`. Throwing here surfaces through `dbHealth()` as
+  // `ok: false` with an actionable message instead of a file-not-found.
+  if (!pgliteFallbackAllowed()) throw new Error(NO_DATABASE_URL_MESSAGE);
   ensureDataDirs();
   const { PGlite } = await import('@electric-sql/pglite');
   const pg = await PGlite.create({ dataDir: env.pgliteDir });
