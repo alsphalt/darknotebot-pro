@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DbClient, MigrationRecord, MigrationStatus } from './types';
+import type { DbClient, DbConnection, MigrationRecord, MigrationStatus } from './types';
 
 /**
  * Version-controlled migrations.
@@ -17,8 +17,10 @@ import type { DbClient, MigrationRecord, MigrationStatus } from './types';
  * of it does not.
  *
  * Guarantees:
- *   - a PostgreSQL advisory lock serialises concurrent boots (several serverless
- *     instances cold-starting at once must not race);
+ *   - a **transaction-scoped** PostgreSQL advisory lock serialises concurrent
+ *     boots (several serverless instances cold-starting at once must not race),
+ *     and is released by PostgreSQL when the transaction ends, so a connection
+ *     pooler cannot leave it held; the whole run is therefore atomic;
  *   - every applied file is recorded with a SHA-256 checksum, so an edited
  *     migration that was already deployed is reported instead of silently
  *     skipped;
@@ -29,7 +31,25 @@ import type { DbClient, MigrationRecord, MigrationStatus } from './types';
 
 const REGISTRY_TABLE = 'db_migrations';
 const LEGACY_TABLE = 'schema_migrations';
-const LOCK_KEY = `hashtext('darknote_migrations')`;
+
+/**
+ * Advisory-lock name for the migration run.
+ *
+ * `_v2` is deliberate: the previous key (`hashtext('darknote_migrations')`) can
+ * still be held by a leaked SESSION-level lock. On Neon's pooled endpoint
+ * (`…-pooler.…neon.tech`) PgBouncer runs in transaction mode and may hand each
+ * statement a different server connection, so `pg_advisory_lock()` was taken on
+ * one backend and `pg_advisory_unlock()` delivered to another. The lock then
+ * stayed held on a connection the application can no longer address, and every
+ * later boot waited out the timeout and failed — the production login page was
+ * stuck on it.
+ *
+ * A new key cannot collide with that orphan. From here on the lock is
+ * transaction-scoped (`pg_advisory_xact_lock`), which PostgreSQL releases on
+ * commit or rollback on the same backend connection the transaction ran on, so
+ * it cannot leak through a pooler.
+ */
+const LOCK_KEY = `hashtext('darknote_migrations_v2')`;
 
 export const BASELINE_NAME = '0001_baseline';
 
@@ -320,36 +340,40 @@ export async function migrationStatus(client: DbClient): Promise<MigrationStatus
   };
 }
 
-async function withAdvisoryLock<T>(
+/**
+ * Run the migrations under a transaction-scoped advisory lock.
+ *
+ * Everything happens on ONE connection: `set local lock_timeout` and
+ * `pg_advisory_xact_lock` inside `client.transaction`. That is what makes the
+ * lock safe behind a transaction-mode pooler — the lock is bound to the same
+ * backend as the DDL that follows it, and PostgreSQL drops it when the
+ * transaction ends, however it ends. The previous implementation used
+ * `pg_try_advisory_lock` on the pool, where lock and unlock could land on
+ * different server connections and the lock outlived the process.
+ *
+ * The timeout is enforced by PostgreSQL (`lock_timeout`) rather than a polling
+ * loop, so a waited-on lock cannot silently extend past it.
+ */
+async function withMigrationLock<T>(
   client: DbClient,
-  fn: () => Promise<T>,
+  fn: (connection: DbConnection) => Promise<T>,
   waitMs = 20_000,
 ): Promise<T> {
-  const deadline = Date.now() + waitMs;
-  let locked = false;
-  while (!locked) {
-    const result = await client.query<{ locked: boolean }>(
-      `select pg_try_advisory_lock(${LOCK_KEY}) as locked`,
-    );
-    locked = Boolean(result.rows[0]?.locked);
-    if (locked) break;
-    if (Date.now() > deadline) {
-      throw new Error(
-        'Another process is running DARKNOTE migrations (advisory lock held for 20s). Retry when it finishes, or run `npm run db:migrate` once from a single machine.',
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  try {
-    return await fn();
-  } finally {
+  return client.transaction(async (connection) => {
+    await connection.query(`set local lock_timeout = '${Math.max(1_000, Math.floor(waitMs))}ms'`);
     try {
-      await client.query(`select pg_advisory_unlock(${LOCK_KEY})`);
-    } catch {
-      /* the connection is closing; the lock dies with the session */
+      await connection.query(`select pg_advisory_xact_lock(${LOCK_KEY})`);
+    } catch (error) {
+      const code = (error as { code?: string } | undefined)?.code;
+      if (code === '55P03') {
+        throw new Error(
+          'Another process is running DARKNOTE migrations (advisory lock held for 20s). Retry when it finishes, or run `npm run db:migrate` once from a single machine.',
+        );
+      }
+      throw error;
     }
-  }
+    return fn(connection);
+  });
 }
 
 export interface MigrateOptions {
@@ -438,7 +462,8 @@ export async function migrate(
     if (record) record.checksum = files[0].checksum;
   }
 
-  const run = async (): Promise<string[]> => {
+  /** Apply every pending file through one executor (the pool or its transaction). */
+  const run = async (executor: DbClient | DbConnection): Promise<string[]> => {
     const appliedNow: string[] = [];
     for (const file of pending) {
       if (options.dryRun) {
@@ -447,12 +472,12 @@ export async function migrate(
       }
       const started = Date.now();
       try {
-        await client.exec(file.sql);
+        await executor.exec(file.sql);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Migration ${file.name} failed: ${message}`);
       }
-      await client.query(
+      await executor.query(
         `insert into ${REGISTRY_TABLE} (name, checksum, duration_ms) values ($1, $2, $3)
          on conflict (name) do update set checksum = excluded.checksum, duration_ms = excluded.duration_ms`,
         [file.name, file.checksum, Date.now() - started],
@@ -462,7 +487,9 @@ export async function migrate(
     return appliedNow;
   };
 
-  const appliedNow = options.noLock ? await run() : await withAdvisoryLock(client, run);
+  const appliedNow = options.noLock
+    ? await run(client)
+    : await withMigrationLock(client, (connection) => run(connection));
   const status = await migrationStatus(client);
 
   return { ...status, appliedNow, skipped: appliedNow.length === 0 };

@@ -1,8 +1,103 @@
 # Darknote Control Center — build status
 
-Last updated: 2026-11-21 · branch `main`
+Last updated: 2026-11-22 · branch `main`
 
-## This pass — `db/schema.sql` resolution, build packaging, one honest correction
+## This pass — the production database never initialised: a leaked migration lock
+
+### What the deployment actually returns
+
+`GET https://v0-darknote.vercel.app/api/health`, unauthenticated, twice thirty
+seconds apart on 2026-11-22:
+
+```
+HTTP 503 · time_total 20.86 s / 20.98 s
+databaseDriver: neon
+databaseTarget: ep-…-pooler.c-9.us-east-2.aws.neon.tech/neondb
+databaseError:  Another process is running DARKNOTE migrations
+                (advisory lock held for 20s). Retry when it finishes…
+tables: null · administrators: null · migrations.applied: 0
+```
+
+`GET /login` answers `200` (the page renders — it is what the operator sees),
+but every API call that needs the database waited the full 20 s and then failed.
+So the live symptom is **not** a missing `db/schema.sql` and **not** a missing
+`DATABASE_URL`: the connection string is configured and points at Neon's pooled
+endpoint. The database layer never got past the migration lock.
+
+### Root cause
+
+`withAdvisoryLock()` took a **session-level** lock (`pg_try_advisory_lock`) with a
+node-postgres `Pool` pointed at `…-pooler.…neon.tech`. That host runs PgBouncer
+in transaction mode: consecutive statements may be served by different backend
+connections. The lock was therefore taken on one backend and
+`pg_advisory_unlock()` was sent to another. The holder kept the lock until its
+connection was recycled, which can be hours, and each new cold start then waited
+20 s, threw, and cached nothing — the whole authenticated surface stayed down.
+
+Production had been failing long enough that `migrations.applied` was still `0`:
+no boot had ever completed the run.
+
+### Fix (`src/lib/db/migrate.ts`)
+
+- **Transaction-scoped lock.** `withMigrationLock()` runs
+  `client.transaction(...)` and issues `select pg_advisory_xact_lock(...)` on that
+  one connection, immediately followed by the DDL on the same connection.
+  PostgreSQL releases an xact lock on commit or rollback, so a pooler cannot
+  leave it behind.
+- **Bounded wait inside PostgreSQL.** `set local lock_timeout` (20 s) replaces the
+  250 ms client polling loop; `55P03` is mapped to the existing operator message.
+- **A new lock key** (`hashtext('darknote_migrations_v2')`). The orphan is held
+  on the old key by a backend this application cannot address, so reusing the old
+  key would keep failing forever. A different key cannot collide with it; the
+  orphan disappears when PgBouncer retires that connection.
+- Migrations now also run atomically: a failure rolls the whole run back instead
+  of leaving half of `schema.sql` applied. The registry insert stays
+  `on conflict`, and every file is still idempotent.
+
+Nothing is deleted, no credential or session is touched, and an existing
+database is adopted exactly as before.
+
+### Also in this pass — the serverless fallback and the login screen
+
+- `db.ts`: `pgliteFallbackAllowed()` refuses the embedded PGlite fallback on
+  Vercel/Lambda/Netlify in production unless `DARKNOTE_DB_DRIVER=pglite` is set
+  deliberately. An ephemeral `/tmp` database would be created empty on one
+  instance and discarded on the next cold start, taking the owner account with
+  it; the error now names `DATABASE_URL` and the pooled Neon connection string.
+- `/api/auth/session` initialises the database inside a `try/catch` and always
+  answers `200` with `database.ok`/`database.error`, so the login page renders
+  the reason instead of a bare 500. A failed probe never reports
+  `needsBootstrap`, which would have invited a second owner.
+- The login page prints that error verbatim and disables sign-in while it is
+  present.
+
+### Verified here
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | **174 tests, 166 pass, 0 fail, 8 skipped** (the skips are the PostgreSQL integration tests; this sandbox has no runnable PostgreSQL — see below) |
+| `tests/migration-lock.test.ts` | lock is `pg_advisory_xact_lock`, inside the transaction, before the baseline; no `pg_try_advisory_lock`/`pg_advisory_unlock` anywhere; conflict maps to the operator message |
+| `tests/migration.test.ts` | a v4-era database still heals through the new transactional path |
+| `npm run build` (isolated worktree at `e4690d2`) | passes; `114/115` route traces list `db/schema.sql` **and** all three `db/migrations/*.sql` |
+| `next start` + PGlite | `/login` 200; `/api/auth/session` 200 `database.ok:true`, `needsBootstrap:true`; `/api/health` 200 `PostgreSQL 18.6`, **54 tables**, migrations applied 4, pending `[]`; `POST /api/auth/bootstrap` created the owner, `POST /api/auth/login` returned the full owner permission set, the session cookie reports the user, `/` returned 200 |
+| Guard, end to end | second instance with `VERCEL=1 NODE_ENV=production` and no `DATABASE_URL`: `/login` 200, `/api/auth/session` 200 with `database.ok:false` and the `DATABASE_URL` message, `/api/health` 503 |
+
+### Not verified here
+
+- **No Vercel credentials in this environment.** The deployment was inspected
+  only through its public endpoints; deployment and runtime *logs* were not
+  readable, so the Next.js digest `2171611015` cannot be decoded here — a digest
+  is build-specific and only that deployment's log rows resolve it.
+- **No Neon credentials.** The fix is exercised against PGlite (same PostgreSQL
+  engine, 18.6) and against the mocked-pool contract test; the real pooled
+  endpoint is not touched. `embedded-postgres` cannot run in this sandbox
+  (its binaries need `libssl.so.1.1`, and `node_modules` is on a `noexec` mount).
+- **No physical Android device.** Chrome/PWA behaviour and the "Aw, Snap!"
+  renderer kill are unchanged by this pass and remain attributed only to what
+  `browser_terminated_session` records on the next launch.
+
+## Previous pass — `db/schema.sql` resolution, build packaging, one honest correction
 
 `db/schema.sql` was already in the repository, at the exact path the code reads
 (`db/schema.sql`, next to `package.json`, committed). What could fail was **finding** it and
