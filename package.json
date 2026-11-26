@@ -21,7 +21,9 @@
     "db:status": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/migrate.ts -- --status",
     "db:maintenance": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts",
     "db:backup": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts --backup",
-    "db:restore": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts restore"
+    "db:restore": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/db-maintenance.ts restore",
+    "nexus:sync": "node --env-file=.env.local --import ./tests/register-hooks.mjs --experimental-strip-types scripts/nexus-sync.ts",
+    "test:nexus": "node --import ./tests/register-hooks.mjs --experimental-strip-types --test tests/nexus-connector.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",

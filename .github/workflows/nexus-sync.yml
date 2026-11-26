@@ -1,0 +1,20 @@
+name: nexus-sync
+
+# Pushes WhatsApp/bot state to DARKNOTE NEXUS on a schedule.
+# GitHub's minimum interval is 5 minutes; the in-app monitor hook keeps state
+# fresh while an operator has the panel open.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger a sync pass
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 30 \
+            -H "authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.NEXUS_SYNC_URL }}"
+        # Fails the job (and shows in the Actions tab) when Nexus rejects the pass.

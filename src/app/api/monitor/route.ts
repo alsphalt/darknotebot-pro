@@ -5,6 +5,7 @@ import { buildMonitor } from '@/lib/views';
 import { power, attachConsole } from '@/lib/services/console';
 import { logActivity } from '@/lib/audit';
 import { PterodactylError } from '@/lib/pterodactyl/client';
+import { maybeSync } from '@/lib/nexus/sync';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -24,6 +25,8 @@ export const GET = route({ permission: 'console.read' }, async ({ req, user }) =
   // Attaching is cheap and idempotent; it is what keeps the console tail alive.
   attachConsole(server);
   const payload = await buildMonitor(server, { lineLimit });
+  // Keep NEXUS informed while an operator has the panel open (no-op if unset).
+  maybeSync();
   return ok(payload);
 });
 
